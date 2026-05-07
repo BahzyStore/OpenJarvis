@@ -25,9 +25,13 @@ function buildWsUrl(agentId?: string): string {
 /**
  * Subscribe to agent events over WebSocket.
  * Auto-reconnects with backoff when the socket drops.
+ *
+ * Pass `agentId` to scope to a single agent, or `null` to subscribe to the
+ * global feed (all agents). `undefined` is treated as "not ready yet" and
+ * skips the connection — same as the original behavior.
  */
 export function useAgentEvents(
-  agentId: string | undefined,
+  agentId: string | null | undefined,
   onEvent: (event: AgentEvent) => void,
   eventTypes?: readonly string[],
 ): void {
@@ -37,7 +41,9 @@ export function useAgentEvents(
   typesRef.current = eventTypes;
 
   useEffect(() => {
-    if (!agentId) return;
+    // undefined = "not ready yet" (e.g. waiting for params); skip the connection.
+    // null = explicit global subscription. Empty string = treated like undefined.
+    if (agentId === undefined || agentId === '') return;
     let ws: WebSocket | null = null;
     let closed = false;
     let retry = 0;
@@ -46,7 +52,7 @@ export function useAgentEvents(
     const connect = () => {
       if (closed) return;
       try {
-        ws = new WebSocket(buildWsUrl(agentId));
+        ws = new WebSocket(buildWsUrl(agentId ?? undefined));
       } catch {
         schedule();
         return;
