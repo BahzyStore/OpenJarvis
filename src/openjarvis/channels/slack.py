@@ -13,6 +13,10 @@ from openjarvis.channels._stubs import (
     ChannelMessage,
     ChannelStatus,
 )
+from openjarvis.channels.slack_credentials import (
+    validate_app_token,
+    validate_bot_token,
+)
 from openjarvis.core.events import EventBus, EventType
 from openjarvis.core.registry import ChannelRegistry
 
@@ -45,6 +49,13 @@ class SlackChannel(BaseChannel):
     ) -> None:
         self._token = bot_token or os.environ.get("SLACK_BOT_TOKEN", "")
         self._app_token = app_token or os.environ.get("SLACK_APP_TOKEN", "")
+        # MC-2: fail fast on obviously-malformed tokens. Empty tokens
+        # remain tolerated (existing behavior — connect() degrades to
+        # ERROR with a clear log message).
+        if self._token:
+            validate_bot_token(self._token)
+        if self._app_token:
+            validate_app_token(self._app_token)
         self._bus = bus
         self._handlers: List[ChannelHandler] = []
         self._status = ChannelStatus.DISCONNECTED

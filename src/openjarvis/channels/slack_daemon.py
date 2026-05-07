@@ -45,6 +45,17 @@ def run_slack_daemon(
     """Run the Slack daemon (blocking). Handles DMs with DeepResearch."""
     import threading
 
+    from openjarvis.channels.slack_credentials import (
+        validate_app_token,
+        validate_bot_token,
+    )
+
+    # MC-2: validate credential shape before any side effects (PID file,
+    # engine bootstrap, network) so a misconfiguration fails fast with a
+    # clear error rather than a confusing slack-bolt traceback.
+    validate_bot_token(bot_token)
+    validate_app_token(app_token)
+
     from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
