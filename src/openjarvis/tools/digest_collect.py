@@ -445,6 +445,18 @@ class DigestCollectTool(BaseTool):
                     {"allowed_data_sources": allowed_data_sources_param},
                     source,
                 ):
+                    # obs-1: emit refusal event for monitoring/frontend hooks.
+                    # Lazy import keeps the happy path's dependency surface unchanged.
+                    from openjarvis.core.events import EventType, get_event_bus
+
+                    get_event_bus().publish(
+                        EventType.DATA_SOURCE_REFUSED,
+                        {
+                            "source_id": source,
+                            "allowed_data_sources": list(allowed_data_sources_param),
+                            "tool": "digest_collect",
+                        },
+                    )
                     errors.append(f"Source '{source}' not permitted by agent allowlist")
                     continue
 
