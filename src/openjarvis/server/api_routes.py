@@ -8,6 +8,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -239,15 +240,49 @@ async def memory_config(request: Request):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@memory_router.get("/health")
+async def memory_health(request: Request):
+    """Memory backend health check.
+
+    Returns 200 with backend stats when functional; 503 with a structured
+    ``{status, reason}`` body when the backend is unavailable or fails a
+    probe call.
+    """
+    backend = _get_memory_backend(request)
+    if backend is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "reason": "no backend available"},
+        )
+    try:
+        items = backend.count()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unavailable", "reason": str(exc)},
+        )
+    return {
+        "status": "ok",
+        "backend": getattr(backend, "backend_id", "unknown"),
+        "items": items,
+    }
+
+
 @memory_router.post("/index")
 async def memory_index(req: MemoryIndexRequest, request: Request):
-    """Index files from a path into memory."""
-    try:
-        from pathlib import Path
+    """Index files from a path into memory.
 
+    Refuses paths inside :data:`SENSITIVE_DIRS` with HTTP 409.
+    """
+    try:
+        from openjarvis.security.file_policy import PathRefused, enforce_safe_path
         from openjarvis.tools.storage.ingest import ingest_path
 
-        target = Path(req.path).expanduser().resolve()
+        try:
+            target = enforce_safe_path(req.path)
+        except PathRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
         if not target.exists():
             raise HTTPException(status_code=404, detail=f"Path not found: {req.path}")
 
