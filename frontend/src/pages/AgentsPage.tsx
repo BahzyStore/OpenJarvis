@@ -31,8 +31,10 @@ import {
   sendblueRegisterWebhook,
   sendblueTest,
   sendblueHealth,
+  fetchBindingAccess,
+  updateBindingAccess,
 } from '../lib/api';
-import type { AgentTask, ChannelBinding, AgentTemplate, AgentMessage, ManagedAgent, LearningLogEntry, AgentTrace, ToolInfo } from '../lib/api';
+import type { AgentTask, ChannelBinding, AgentTemplate, AgentMessage, ManagedAgent, LearningLogEntry, AgentTrace, ToolInfo, BindingAccess } from '../lib/api';
 import { useAgentEvents } from '../lib/useAgentEvents';
 import {
   Plus,
@@ -60,6 +62,8 @@ import {
   Copy,
   Check,
   Pencil,
+  Lock,
+  ShieldCheck,
 } from 'lucide-react';
 import { SOURCE_CATALOG } from '../types/connectors';
 import type { ConnectRequest } from '../types/connectors';
@@ -2789,6 +2793,7 @@ function SendBlueWizard({
           </div>
           {error && <div style={{ color: 'var(--color-error)', fontSize: 11, marginTop: 6 }}>{error}</div>}
         </div>
+        <SenderAllowlistPanel agentId={agentId} bindingId={binding!.id} />
       </div>
     );
   }
@@ -2947,6 +2952,295 @@ function SendBlueWizard({
           apiSecret={apiSecret}
           selectedNumber={selectedNumber}
         />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Per-binding sender allowlist sub-panel (MC-4)
+// ---------------------------------------------------------------------------
+
+function SenderAllowlistPanel({
+  agentId,
+  bindingId,
+}: {
+  agentId: string;
+  bindingId: string;
+}) {
+  const [access, setAccess] = useState<BindingAccess | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    fetchBindingAccess(agentId, bindingId)
+      .then((a) => { if (!cancelled) setAccess(a); })
+      .catch((e: Error) => { if (!cancelled) setError(e.message || 'Failed to load access'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [agentId, bindingId]);
+
+  const persist = async (next: string[]): Promise<boolean> => {
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await updateBindingAccess(agentId, bindingId, next);
+      setAccess(updated);
+      return true;
+    } catch (e) {
+      setError((e as Error).message || 'Failed to update');
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAdd = async () => {
+    const trimmed = draft.trim();
+    if (!trimmed) {
+      setError('Sender cannot be empty');
+      return;
+    }
+    if (!access) return;
+    if (access.allowed_senders.includes(trimmed)) {
+      setError('Sender is already in the allowlist');
+      return;
+    }
+    const ok = await persist([...access.allowed_senders, trimmed]);
+    if (ok) setDraft('');
+  };
+
+  const handleRemove = async (sender: string) => {
+    if (!access) return;
+    await persist(access.allowed_senders.filter((s) => s !== sender));
+  };
+
+  const handleRestrict = async () => {
+    // Seed the list with a single sentinel? No — open the input UI.
+    // Switching from unrestricted -> restricted requires at least one sender.
+    // We just focus the input; the next add() call will PATCH a non-empty list.
+    setDraft('');
+    setError('Add at least one sender to enable the allowlist');
+  };
+
+  const handleResetUnrestricted = async () => {
+    if (!access) return;
+    await persist([]);
+    setDraft('');
+  };
+
+  const wrapStyle: React.CSSProperties = {
+    borderTop: '1px solid var(--color-border)',
+    padding: '12px 14px',
+    background: 'var(--color-bg)',
+  };
+
+  const labelStyle: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 6,
+    fontSize: 11, fontWeight: 600,
+    color: 'var(--color-text-secondary)',
+    textTransform: 'uppercase', letterSpacing: 0.5,
+    marginBottom: 8,
+  };
+
+  const inputStyle: React.CSSProperties = {
+    flex: 1, padding: '6px 10px',
+    background: 'var(--color-bg-secondary)',
+    border: '1px solid var(--color-border)',
+    borderRadius: 4, color: 'var(--color-text)',
+    fontSize: 12, boxSizing: 'border-box',
+  };
+
+  const btnPrimary: React.CSSProperties = {
+    fontSize: 11, padding: '6px 14px',
+    background: 'var(--color-accent-purple)',
+    color: 'var(--color-on-accent)',
+    border: 'none', borderRadius: 4,
+    cursor: 'pointer', fontWeight: 600,
+    whiteSpace: 'nowrap',
+  };
+
+  const btnSecondary: React.CSSProperties = {
+    fontSize: 10, padding: '4px 10px',
+    background: 'transparent',
+    color: 'var(--color-text-secondary)',
+    border: '1px solid var(--color-border)',
+    borderRadius: 4, cursor: 'pointer',
+  };
+
+  if (loading) {
+    return (
+      <div style={wrapStyle}>
+        <div style={labelStyle}>
+          <Lock size={11} /> Sender Allowlist
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--color-text-tertiary)' }}>Loading...</div>
+      </div>
+    );
+  }
+
+  if (!access) {
+    return (
+      <div style={wrapStyle}>
+        <div style={labelStyle}>
+          <Lock size={11} /> Sender Allowlist
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--color-error)' }}>
+          {error || 'Failed to load allowlist'}
+        </div>
+      </div>
+    );
+  }
+
+  // Unrestricted state: invite user to enable restrictions
+  if (access.unrestricted) {
+    return (
+      <div style={wrapStyle}>
+        <div style={labelStyle}>
+          <ShieldCheck size={11} /> Sender Allowlist
+        </div>
+        <div
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            gap: 10, flexWrap: 'wrap',
+          }}
+        >
+          <div style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>
+            All senders permitted (no restriction)
+          </div>
+          <button onClick={handleRestrict} style={btnSecondary}>
+            Restrict senders
+          </button>
+        </div>
+        {/* Inline add field — only visible after Restrict clicked (draft was cleared and error set) */}
+        {error && (
+          <div style={{ marginTop: 10 }}>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <input
+                value={draft}
+                onChange={(e) => { setDraft(e.target.value); setError(''); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAdd(); } }}
+                placeholder="e.g. +15551234567"
+                style={inputStyle}
+                disabled={saving}
+              />
+              <button
+                onClick={handleAdd}
+                disabled={saving || !draft.trim()}
+                style={{ ...btnPrimary, opacity: saving || !draft.trim() ? 0.5 : 1 }}
+              >
+                {saving ? 'Saving...' : 'Add'}
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 4 }}>
+              {error}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Restricted state: chips + add + reset
+  return (
+    <div style={wrapStyle}>
+      <div style={{ ...labelStyle, justifyContent: 'space-between' }}>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <Lock size={11} /> Sender Allowlist
+          <span
+            style={{
+              background: 'color-mix(in srgb, var(--color-warning) 18%, transparent)',
+              color: 'var(--color-warning)',
+              padding: '1px 6px', borderRadius: 8,
+              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+            }}
+          >
+            RESTRICTED
+          </span>
+        </span>
+        <button
+          onClick={handleResetUnrestricted}
+          disabled={saving}
+          style={{ ...btnSecondary, textTransform: 'none', letterSpacing: 0, fontWeight: 400, opacity: saving ? 0.5 : 1 }}
+        >
+          Reset to unrestricted
+        </button>
+      </div>
+
+      {/* Chips */}
+      {access.allowed_senders.length > 0 && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+          {access.allowed_senders.map((sender) => (
+            <span
+              key={sender}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                background: 'var(--color-bg-secondary)',
+                border: '1px solid var(--color-border)',
+                borderRadius: 12,
+                padding: '3px 4px 3px 10px',
+                fontSize: 11,
+                color: 'var(--color-text)',
+                fontFamily: 'var(--font-mono, monospace)',
+              }}
+            >
+              {sender}
+              <button
+                onClick={() => handleRemove(sender)}
+                disabled={saving}
+                title={`Remove ${sender}`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  width: 16, height: 16,
+                  background: 'transparent',
+                  color: 'var(--color-text-secondary)',
+                  border: 'none', borderRadius: '50%',
+                  cursor: saving ? 'not-allowed' : 'pointer',
+                  padding: 0,
+                  opacity: saving ? 0.5 : 1,
+                }}
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Add field */}
+      <div style={{ display: 'flex', gap: 6 }}>
+        <input
+          value={draft}
+          onChange={(e) => { setDraft(e.target.value); setError(''); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleAdd(); } }}
+          placeholder="Add sender (e.g. +15551234567)"
+          style={inputStyle}
+          disabled={saving}
+        />
+        <button
+          onClick={handleAdd}
+          disabled={saving || !draft.trim()}
+          style={{ ...btnPrimary, opacity: saving || !draft.trim() ? 0.5 : 1 }}
+        >
+          {saving ? 'Saving...' : 'Add'}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ fontSize: 10, color: 'var(--color-error)', marginTop: 6 }}>
+          {error}
+        </div>
+      )}
+
+      {access.allowed_senders.length === 0 && !error && (
+        <div style={{ fontSize: 10, color: 'var(--color-text-tertiary)', marginTop: 6 }}>
+          No senders yet — list is empty (treated as unrestricted by the backend).
+        </div>
       )}
     </div>
   );
@@ -3118,6 +3412,11 @@ function MessagingTab({ agentId }: { agentId: string }) {
                   <span>{ch.howToUse(cfg)}</span>
                 </div>
               </div>
+            )}
+
+            {/* Active state: per-binding sender allowlist */}
+            {binding && (
+              <SenderAllowlistPanel agentId={agentId} bindingId={binding.id} />
             )}
 
             {/* Setup form */}
