@@ -60,3 +60,41 @@ class TestWSBridge:
             time.sleep(0.05)  # Let call_soon_threadsafe deliver to queue
             data = ws.receive_json()
             assert data["data"]["agent_id"] == "agent-A"
+
+    def test_data_source_refused_forwarded(self, app, event_bus):
+        """obs-3: AG-9 refusal events reach unfiltered WebSocket clients."""
+        client = TestClient(app)
+        with client.websocket_connect("/v1/agents/events") as ws:
+            event_bus.publish(
+                EventType.DATA_SOURCE_REFUSED,
+                {
+                    "source_id": "gmail",
+                    "allowed_data_sources": ["slack"],
+                    "tool": "knowledge_search",
+                },
+            )
+            time.sleep(0.05)
+            data = ws.receive_json()
+            assert data["type"] == "data_source_refused"
+            assert data["data"]["source_id"] == "gmail"
+            assert data["data"]["tool"] == "knowledge_search"
+            assert data["data"]["allowed_data_sources"] == ["slack"]
+
+    def test_channel_message_refused_forwarded(self, app, event_bus):
+        """obs-3: MC-4 sender refusal events reach unfiltered WebSocket clients."""
+        client = TestClient(app)
+        with client.websocket_connect("/v1/agents/events") as ws:
+            event_bus.publish(
+                EventType.CHANNEL_MESSAGE_REFUSED,
+                {
+                    "sender_id": "user_evil",
+                    "channel_type": "slack",
+                    "reason": "no_binding_allowlist_match",
+                },
+            )
+            time.sleep(0.05)
+            data = ws.receive_json()
+            assert data["type"] == "channel_message_refused"
+            assert data["data"]["sender_id"] == "user_evil"
+            assert data["data"]["channel_type"] == "slack"
+            assert data["data"]["reason"] == "no_binding_allowlist_match"
