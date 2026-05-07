@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
 from openjarvis.core.config import DEFAULT_CONFIG_DIR
+from openjarvis.security import secrets_store
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Connector credentials directory
@@ -237,38 +241,91 @@ def resolve_google_credentials(connector_path: str) -> str:
     return connector_path
 
 
-def load_tokens(path: str) -> Optional[Dict[str, Any]]:
-    """Load OAuth tokens from a JSON file.
+def _path_to_key(path: str) -> str:
+    """Map a legacy file path to a :mod:`secrets_store` key.
 
-    Returns ``None`` if the file is missing, unreadable, or contains
-    invalid JSON.
+    ``~/.openjarvis/connectors/google.json`` -> ``connectors/google``.
+    Paths outside :data:`DEFAULT_CONFIG_DIR` use the absolute path
+    (slash-normalized, ``.json`` stripped) so distinct files never collide.
     """
-    p = Path(path)
+    p = Path(path).expanduser()
+    try:
+        rel = p.relative_to(DEFAULT_CONFIG_DIR).with_suffix("")
+        return str(rel).replace(os.sep, "/")
+    except ValueError:
+        # Outside the config dir — use the absolute path as the key so two
+        # different files (e.g. distinct pytest tmp_paths with the same name)
+        # don't collide on a shared stem.
+        absolute = str(p.with_suffix("")).replace(os.sep, "/").lstrip("/")
+        return absolute
+
+
+def load_tokens(path: str) -> Optional[Dict[str, Any]]:
+    """Load OAuth tokens for *path*.
+
+    Reads from :mod:`secrets_store` first. If absent and a legacy JSON file
+    exists at *path*, transparently migrates it into the store and renames
+    the original to ``*.legacy`` for safekeeping. Returns ``None`` only when
+    no tokens are found in either location.
+    """
+    key = _path_to_key(path)
+    raw = secrets_store.get_secret(key)
+    if raw is not None:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+
+    # Migration: legacy JSON file at *path*.
+    p = Path(path).expanduser()
     if not p.exists():
         return None
     try:
-        raw = p.read_text(encoding="utf-8")
-        return json.loads(raw)
+        legacy_raw = p.read_text(encoding="utf-8")
+        tokens = json.loads(legacy_raw)
     except (OSError, json.JSONDecodeError):
         return None
 
+    try:
+        secrets_store.set_secret(key, legacy_raw)
+        legacy_dest = p.with_suffix(p.suffix + ".legacy")
+        try:
+            p.rename(legacy_dest)
+        except OSError:
+            pass  # Best-effort; cross-device renames may fail.
+        logger.info("Migrated %s to secrets_store as %r", p, key)
+    except Exception:
+        logger.exception("Failed to migrate %s to secrets_store", p)
+        # Still return the tokens we successfully read.
+
+    return tokens
+
 
 def save_tokens(path: str, tokens: Dict[str, Any]) -> None:
-    """Persist *tokens* to *path* as JSON with owner-only (0o600) permissions.
+    """Persist *tokens* via the secrets_store, keyed off the legacy *path*.
 
-    Creates parent directories as needed.
+    The legacy *path* is **not** written to disk; the parameter is preserved
+    only for API compatibility with existing callers.
     """
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
-    os.chmod(path, 0o600)
+    key = _path_to_key(path)
+    secrets_store.set_secret(key, json.dumps(tokens))
 
 
 def delete_tokens(path: str) -> None:
-    """Delete the credentials file at *path* if it exists."""
-    p = Path(path)
-    if p.exists():
-        p.unlink()
+    """Remove tokens for *path* from the secrets_store and any leftover files.
+
+    Cleans up both the original JSON file (if it still exists) and any
+    ``*.legacy`` sidecar produced by an earlier migration.
+    """
+    key = _path_to_key(path)
+    secrets_store.delete_secret(key)
+    p = Path(path).expanduser()
+    for candidate in (p, p.with_suffix(p.suffix + ".legacy")):
+        if candidate.exists():
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
