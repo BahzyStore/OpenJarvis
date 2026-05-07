@@ -612,6 +612,32 @@ def _tool_progress_label(tool_name: str, args: str) -> str:
     return label
 
 
+def _build_per_call_executor(
+    tool_instance: Any,
+    bus: Any,
+    *,
+    allowed_data_sources: Optional[List[str]] = None,
+) -> Any:
+    """Construct the per-tool-call ``ToolExecutor`` used by managed-agent runs.
+
+    Centralises construction so AG-9 wiring (per-agent
+    ``allowed_data_sources``) flows through one chokepoint rather than each
+    inline call site. Tools the user explicitly added to the agent's toolkit
+    are pre-approved here (``interactive=True`` + auto-confirm) so tools with
+    ``requires_confirmation=True`` (shell_exec, apply_patch) don't fail with
+    "requires confirmation but no callback available" on every call.
+    """
+    from openjarvis.tools._stubs import ToolExecutor
+
+    return ToolExecutor(
+        tools=[tool_instance],
+        bus=bus,
+        interactive=True,
+        confirm_callback=lambda _prompt: True,
+        allowed_data_sources=allowed_data_sources,
+    )
+
+
 async def _stream_managed_agent(
     *,
     manager: AgentManager,
@@ -1169,26 +1195,22 @@ async def _stream_managed_agent(
                             from openjarvis.tools._stubs import (
                                 ToolCall as StubToolCall,
                             )
-                            from openjarvis.tools._stubs import (
-                                ToolExecutor,
-                            )
 
                             tool_cls = ToolRegistry.get(tool_name)
                             if tool_cls is not None:
                                 tool_instance = tool_cls()
-                                # Tools the user explicitly added to this
-                                # agent's toolkit are considered pre-approved —
-                                # selecting them in the wizard is the
-                                # confirmation. Without this, tools that have
-                                # `requires_confirmation=True` (shell_exec,
-                                # apply_patch) would fail with "requires
-                                # confirmation but no callback available" on
-                                # every call.
-                                executor = ToolExecutor(
-                                    tools=[tool_instance],
-                                    bus=bus,
-                                    interactive=True,
-                                    confirm_callback=lambda _prompt: True,
+                                # Build the per-call executor via the
+                                # _build_per_call_executor helper, which also
+                                # threads the agent's AG-9 allowlist (Phase
+                                # 17) so the dispatcher auto-injects
+                                # allowed_data_sources into AG-9-aware tools
+                                # without per-call kwarg plumbing.
+                                executor = _build_per_call_executor(
+                                    tool_instance,
+                                    bus,
+                                    allowed_data_sources=config.get(
+                                        "allowed_data_sources"
+                                    ),
                                 )
                                 result = executor.execute(
                                     StubToolCall(

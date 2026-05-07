@@ -37,12 +37,8 @@ class TestAgentManagerRoutes:
         from openjarvis.server.agent_manager_routes import create_agent_manager_router
 
         app = FastAPI()
-        routers = create_agent_manager_router(manager)
-        agents_router, templates_router, global_router, tools_router = routers
-        app.include_router(agents_router)
-        app.include_router(templates_router)
-        app.include_router(global_router)
-        app.include_router(tools_router)
+        for r in create_agent_manager_router(manager):
+            app.include_router(r)
         return TestClient(app)
 
     def test_list_agents_empty(self, client):
@@ -286,12 +282,8 @@ class TestAgentManagerStreaming:
         app.state.engine = _mock_engine
         app.state.bus = None
 
-        routers = create_agent_manager_router(manager)
-        agents_router, templates_router, global_router, tools_router = routers
-        app.include_router(agents_router)
-        app.include_router(templates_router)
-        app.include_router(global_router)
-        app.include_router(tools_router)
+        for r in create_agent_manager_router(manager):
+            app.include_router(r)
         return TestClient(app)
 
     def test_send_message_stream(self, manager, stream_client):
@@ -494,3 +486,100 @@ class TestResolveToolSpecs:
 
         assert _resolve_tool_specs(None) == []
         assert _resolve_tool_specs([]) == []
+
+
+# ---------------------------------------------------------------------------
+# AG-9 wiring: agent.config.allowed_data_sources → ToolExecutor (Phase 17)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPerCallExecutor:
+    """The streaming-run handler's inline executor construction was
+    extracted into _build_per_call_executor so the AG-9 allowlist
+    threads through one chokepoint. These tests verify that wiring."""
+
+    def _fake_tool(self):
+        from openjarvis.core.types import ToolResult
+        from openjarvis.tools._stubs import BaseTool, ToolSpec
+
+        class _T(BaseTool):
+            tool_id = "fake_for_executor_helper"
+
+            @property
+            def spec(self) -> ToolSpec:
+                return ToolSpec(
+                    name="fake_for_executor_helper",
+                    description="ok",
+                    parameters={"type": "object", "properties": {}},
+                )
+
+            def execute(self, **params):
+                return ToolResult(
+                    tool_name="fake_for_executor_helper",
+                    content="ok",
+                    success=True,
+                )
+
+        return _T()
+
+    def test_passes_allowlist_when_set(self):
+        from openjarvis.server.agent_manager_routes import (
+            _build_per_call_executor,
+        )
+
+        executor = _build_per_call_executor(
+            self._fake_tool(),
+            bus=None,
+            allowed_data_sources=["gmail", "slack"],
+        )
+        assert executor._allowed_data_sources == ["gmail", "slack"]
+
+    def test_passes_none_when_kwarg_omitted(self):
+        # Default arg → None preserves legacy (no auto-injection) behavior
+        # for agents that have never set an allowlist.
+        from openjarvis.server.agent_manager_routes import (
+            _build_per_call_executor,
+        )
+
+        executor = _build_per_call_executor(self._fake_tool(), bus=None)
+        assert executor._allowed_data_sources is None
+
+    def test_passes_empty_list_through(self):
+        # config.get("allowed_data_sources") returns [] when the user has
+        # explicitly set deny-all — must reach the executor unchanged
+        # (Phase 5 semantics: empty list = deny all data sources).
+        from openjarvis.server.agent_manager_routes import (
+            _build_per_call_executor,
+        )
+
+        executor = _build_per_call_executor(
+            self._fake_tool(),
+            bus=None,
+            allowed_data_sources=[],
+        )
+        assert executor._allowed_data_sources == []
+
+    def test_passes_wildcard(self):
+        from openjarvis.server.agent_manager_routes import (
+            _build_per_call_executor,
+        )
+
+        executor = _build_per_call_executor(
+            self._fake_tool(),
+            bus=None,
+            allowed_data_sources=["*"],
+        )
+        assert executor._allowed_data_sources == ["*"]
+
+    def test_executor_is_interactive_with_auto_confirm(self):
+        # Tools the user explicitly added are pre-approved — verify the
+        # helper preserves the auto-confirm behavior the inline call site
+        # had. Without this, requires_confirmation=True tools would fail.
+        from openjarvis.server.agent_manager_routes import (
+            _build_per_call_executor,
+        )
+
+        executor = _build_per_call_executor(self._fake_tool(), bus=None)
+        assert executor._interactive is True
+        assert executor._confirm_callback is not None
+        assert executor._confirm_callback("ignored") is True
