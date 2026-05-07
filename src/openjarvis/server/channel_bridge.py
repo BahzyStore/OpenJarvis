@@ -136,6 +136,15 @@ class ChannelBridge:
                 sender_id,
                 channel_type,
             )
+            # obs-2: emit refusal event for monitoring/frontend hooks.
+            self._bus.publish(
+                EventType.CHANNEL_MESSAGE_REFUSED,
+                {
+                    "sender_id": sender_id,
+                    "channel_type": channel_type,
+                    "reason": "no_binding_allowlist_match",
+                },
+            )
             return ""
 
         self._session_store.get_or_create(sender_id, channel_type)
