@@ -93,3 +93,82 @@ class TestTraceRoutes:
         client = TestClient(_make_app())
         resp = client.get("/v1/traces")
         assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Memory subsystem — health endpoint (MEM-1) and path safety on /index (MEM-4)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryHealth:
+    def test_health_returns_200_or_503(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/memory/health")
+        assert resp.status_code in (200, 503)
+        body = resp.json()
+        assert body.get("status") in ("ok", "unavailable")
+
+    def test_health_ok_shape(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/memory/health")
+        if resp.status_code == 200:
+            body = resp.json()
+            assert body["status"] == "ok"
+            assert "backend" in body
+            assert "items" in body
+            assert isinstance(body["items"], int)
+
+    def test_health_unavailable_shape(self):
+        client = TestClient(_make_app())
+        resp = client.get("/v1/memory/health")
+        if resp.status_code == 503:
+            body = resp.json()
+            assert body["status"] == "unavailable"
+            assert "reason" in body
+
+
+class TestMemoryIndexSafety:
+    def test_index_refuses_sensitive_dir_with_409(self, tmp_path, monkeypatch):
+        protected = tmp_path / "vault"
+        protected.mkdir()
+        target = protected / "private.key"
+        target.write_text("secret")
+        monkeypatch.setattr(
+            "openjarvis.security.file_policy.SENSITIVE_DIRS",
+            (str(protected),),
+        )
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/memory/index",
+            json={"path": str(target)},
+        )
+        assert resp.status_code == 409
+        detail = resp.json().get("detail", "")
+        assert "protected" in str(detail).lower() or "vault" in str(detail)
+
+    def test_index_refuses_protected_dir_root_with_409(self, tmp_path, monkeypatch):
+        protected = tmp_path / "vault"
+        protected.mkdir()
+        monkeypatch.setattr(
+            "openjarvis.security.file_policy.SENSITIVE_DIRS",
+            (str(protected),),
+        )
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/memory/index",
+            json={"path": str(protected)},
+        )
+        assert resp.status_code == 409
+
+    def test_index_unprotected_missing_path_returns_404(self, tmp_path):
+        # An unprotected, non-existent path should yield 404 (path-not-found),
+        # not 409 (refused). The route reaches the .exists() check.
+        missing = tmp_path / "does-not-exist.txt"
+        client = TestClient(_make_app())
+        resp = client.post(
+            "/v1/memory/index",
+            json={"path": str(missing)},
+        )
+        # 404 (not found) is the documented path; 503 (no backend) is also
+        # acceptable depending on the test environment.
+        assert resp.status_code in (404, 503)
