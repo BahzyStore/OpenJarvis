@@ -116,6 +116,35 @@ class KnowledgeSearchTool(BaseTool):
         since: Optional[str] = params.get("since")
         until: Optional[str] = params.get("until")
 
+        # AG-9: optional harness-injected per-agent data-source allowlist.
+        # When present, refuse explicit denied sources up front and
+        # post-filter unfiltered queries. None = no policy (legacy behavior).
+        allowed_data_sources_param = params.get("allowed_data_sources")
+
+        if allowed_data_sources_param is not None and source is not None:
+            from openjarvis.agents.access import is_data_source_allowed
+
+            if not is_data_source_allowed(
+                {"allowed_data_sources": allowed_data_sources_param},
+                source,
+            ):
+                from openjarvis.core.events import EventType, get_event_bus
+
+                get_event_bus().publish(
+                    EventType.DATA_SOURCE_REFUSED,
+                    {
+                        "source_id": source,
+                        "allowed_data_sources": list(allowed_data_sources_param),
+                        "tool": "knowledge_search",
+                    },
+                )
+                return ToolResult(
+                    tool_name="knowledge_search",
+                    content=(f"Source '{source}' not permitted by agent allowlist."),
+                    success=False,
+                    metadata={"num_results": 0, "refused_source": source},
+                )
+
         if self._retriever is not None:
             results = self._retriever.retrieve(
                 query,
@@ -136,6 +165,39 @@ class KnowledgeSearchTool(BaseTool):
                 since=since,
                 until=until,
             )
+
+        # AG-9 post-filter: when allowlist is set and source wasn't pinned,
+        # drop results from sources not on the allowlist. Emit one summary
+        # event per call listing the unique dropped sources (avoids
+        # event-spam per result).
+        if allowed_data_sources_param is not None and source is None and results:
+            from openjarvis.agents.access import is_data_source_allowed
+
+            kept = []
+            dropped_sources: set[str] = set()
+            for r in results:
+                r_source = r.source or r.metadata.get("source", "")
+                if is_data_source_allowed(
+                    {"allowed_data_sources": allowed_data_sources_param},
+                    r_source,
+                ):
+                    kept.append(r)
+                elif r_source:
+                    dropped_sources.add(r_source)
+
+            if dropped_sources:
+                from openjarvis.core.events import EventType, get_event_bus
+
+                get_event_bus().publish(
+                    EventType.DATA_SOURCE_REFUSED,
+                    {
+                        "source_id": None,
+                        "dropped_sources": sorted(dropped_sources),
+                        "allowed_data_sources": list(allowed_data_sources_param),
+                        "tool": "knowledge_search",
+                    },
+                )
+            results = kept
 
         if not results:
             return ToolResult(
