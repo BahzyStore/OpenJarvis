@@ -286,3 +286,69 @@ class TestChannelMessageRefusedEvent:
             e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
         ]
         assert refused == []
+
+    def test_refused_event_includes_binding_context(self, bridge, mock_system, bus):
+        # MC-4 binding context: payload includes refused_by_bindings list
+        # with {binding_id, agent_id, channel_type} for each binding whose
+        # allowlist actively refused the sender.
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = False
+        mgr.get_refusing_bindings_for_channel.return_value = [
+            {
+                "binding_id": "bind-1",
+                "agent_id": "agent-A",
+                "channel_type": "fake",
+            },
+            {
+                "binding_id": "bind-2",
+                "agent_id": "agent-B",
+                "channel_type": "fake",
+            },
+        ]
+        bridge._agent_manager = mgr
+        bridge.handle_incoming("user_evil", "hello", "fake")
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
+        ]
+        assert len(refused) == 1
+        bindings = refused[0].data["refused_by_bindings"]
+        assert len(bindings) == 2
+        assert {b["agent_id"] for b in bindings} == {"agent-A", "agent-B"}
+        mgr.get_refusing_bindings_for_channel.assert_called_once_with(
+            "fake", "user_evil"
+        )
+
+    def test_refused_event_payload_falls_back_to_empty_list(
+        self, bridge, mock_system, bus
+    ):
+        # If the manager doesn't expose get_refusing_bindings_for_channel
+        # (older builds), the event still fires with refused_by_bindings=[].
+        class _LegacyManager:
+            def is_sender_allowed_for_channel(self, ct, sid):
+                return False
+
+        bridge._agent_manager = _LegacyManager()
+        bridge.handle_incoming("user_evil", "hello", "fake")
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0].data["refused_by_bindings"] == []
+
+    def test_refused_event_handles_helper_exception(self, bridge, mock_system, bus):
+        # If the helper raises, the refusal event still fires (with
+        # refused_by_bindings=[]). Drop is the primary contract;
+        # binding context is best-effort enrichment.
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = False
+        mgr.get_refusing_bindings_for_channel.side_effect = RuntimeError("db down")
+        bridge._agent_manager = mgr
+        bridge.handle_incoming("user_evil", "hello", "fake")
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0].data["refused_by_bindings"] == []

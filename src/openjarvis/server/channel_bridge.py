@@ -136,13 +136,27 @@ class ChannelBridge:
                 sender_id,
                 channel_type,
             )
-            # obs-2: emit refusal event for monitoring/frontend hooks.
+            # obs-2 + MC-4 binding context: emit refusal event including
+            # the per-binding context (which agent's allowlist refused),
+            # so the inspector can attribute the drop. Falls back to []
+            # if the manager doesn't expose the helper (older builds).
+            refused_by_bindings: List[Dict[str, Any]] = []
+            if hasattr(self._agent_manager, "get_refusing_bindings_for_channel"):
+                try:
+                    refused_by_bindings = (
+                        self._agent_manager.get_refusing_bindings_for_channel(
+                            channel_type, sender_id
+                        )
+                    )
+                except Exception:
+                    logger.exception("Failed to enumerate refusing bindings")
             self._bus.publish(
                 EventType.CHANNEL_MESSAGE_REFUSED,
                 {
                     "sender_id": sender_id,
                     "channel_type": channel_type,
                     "reason": "no_binding_allowlist_match",
+                    "refused_by_bindings": refused_by_bindings,
                 },
             )
             return ""

@@ -224,6 +224,88 @@ class TestSenderAllowlistAggregate:
         assert manager.is_sender_allowed_for_channel("telegram", "12345") is True
 
 
+class TestRefusingBindingsForChannel:
+    """MC-4 binding context: get_refusing_bindings_for_channel returns the
+    list of bindings whose allowlist actively refused a sender, so the
+    refusal event payload can attribute the drop."""
+
+    def test_no_bindings_returns_empty(self, manager):
+        assert manager.get_refusing_bindings_for_channel("slack", "U999") == []
+
+    def test_unrestricted_binding_does_not_refuse(self, manager):
+        # Empty allowlist = unrestricted: never appears as a refuser.
+        agent = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(agent["id"], channel_type="slack", config={})
+        assert manager.get_refusing_bindings_for_channel("slack", "U999") == []
+
+    def test_restricted_binding_with_match_does_not_refuse(self, manager):
+        agent = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(
+            agent["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U123"]},
+        )
+        # Sender is on the allowlist → not in refusers.
+        assert manager.get_refusing_bindings_for_channel("slack", "U123") == []
+
+    def test_restricted_binding_without_match_appears_in_refusers(self, manager):
+        agent = manager.create_agent(name="a", agent_type="simple")
+        binding = manager.bind_channel(
+            agent["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U123"]},
+        )
+        result = manager.get_refusing_bindings_for_channel("slack", "U999")
+        assert len(result) == 1
+        assert result[0]["binding_id"] == binding["id"]
+        assert result[0]["agent_id"] == agent["id"]
+        assert result[0]["channel_type"] == "slack"
+
+    def test_two_restricted_bindings_sender_in_neither_lists_both(self, manager):
+        a1 = manager.create_agent(name="a1", agent_type="simple")
+        a2 = manager.create_agent(name="a2", agent_type="simple")
+        manager.bind_channel(
+            a1["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U111"]},
+        )
+        manager.bind_channel(
+            a2["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U222"]},
+        )
+        result = manager.get_refusing_bindings_for_channel("slack", "U999")
+        assert len(result) == 2
+        agent_ids = {r["agent_id"] for r in result}
+        assert agent_ids == {a1["id"], a2["id"]}
+
+    def test_mixed_only_refusing_appears(self, manager):
+        # One unrestricted binding (U999 allowed) + one restricted that
+        # refuses U999. Only the restricted one shows up.
+        a1 = manager.create_agent(name="a1", agent_type="simple")
+        a2 = manager.create_agent(name="a2", agent_type="simple")
+        manager.bind_channel(a1["id"], channel_type="slack", config={})
+        b2 = manager.bind_channel(
+            a2["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U111"]},
+        )
+        result = manager.get_refusing_bindings_for_channel("slack", "U999")
+        assert len(result) == 1
+        assert result[0]["binding_id"] == b2["id"]
+        assert result[0]["agent_id"] == a2["id"]
+
+    def test_other_channel_type_isolated(self, manager):
+        a = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(
+            a["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U111"]},
+        )
+        # Querying a different channel_type → no refusers (no bindings).
+        assert manager.get_refusing_bindings_for_channel("telegram", "U999") == []
+
+
 class TestSummaryMemory:
     def test_initial_summary_empty(self, manager):
         agent = manager.create_agent(name="test", agent_type="simple")
