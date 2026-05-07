@@ -475,6 +475,55 @@ export async function unbindAgentChannel(
   if (!res.ok) throw new Error(`Failed: ${res.status}`);
 }
 
+// -- Per-binding sender allowlist (MC-4) ----------------------------------
+
+export interface BindingAccess {
+  binding_id: string;
+  agent_id: string;
+  channel_type: string;
+  allowed_senders: string[];
+  unrestricted: boolean;
+}
+
+export async function fetchBindingAccess(
+  agentId: string,
+  bindingId: string,
+): Promise<BindingAccess> {
+  const res = await fetch(
+    `${getBase()}/v1/managed-agents/${agentId}/channels/${bindingId}/access`,
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateBindingAccess(
+  agentId: string,
+  bindingId: string,
+  allowedSenders: string[],
+): Promise<BindingAccess> {
+  const res = await fetch(
+    `${getBase()}/v1/managed-agents/${agentId}/channels/${bindingId}/access`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allowed_senders: allowedSenders }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    // FastAPI 422 may put errors in body.detail (string or array).
+    let detail: string = body.detail;
+    if (Array.isArray(body.detail)) {
+      detail = body.detail.map((d: any) => d.msg || JSON.stringify(d)).join('; ');
+    }
+    throw new Error(detail || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
 // -- SendBlue auto-setup helpers ------------------------------------------
 
 export async function sendblueVerify(
