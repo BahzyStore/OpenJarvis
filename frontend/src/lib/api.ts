@@ -723,6 +723,43 @@ export async function fetchErrorAgents(): Promise<ManagedAgent[]> {
 }
 
 // ---------------------------------------------------------------------------
+// AG-9: Per-agent data-source access allowlist
+// ---------------------------------------------------------------------------
+
+export interface AgentDataSourceAccess {
+  allowed_data_sources: string[];
+  available_data_sources: string[];
+  wildcard: boolean;
+}
+
+export async function fetchAgentDataSourceAccess(
+  agentId: string,
+): Promise<AgentDataSourceAccess> {
+  const res = await fetch(`${getBase()}/v1/managed-agents/${agentId}/access`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateAgentDataSourceAccess(
+  agentId: string,
+  allowedDataSources: string[],
+): Promise<AgentDataSourceAccess> {
+  const res = await fetch(`${getBase()}/v1/managed-agents/${agentId}/access`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allowed_data_sources: allowedDataSources }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(body.detail || `Failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
 // Agent Learning + Traces
 // ---------------------------------------------------------------------------
 

@@ -66,6 +66,7 @@ import type { ConnectRequest } from '../types/connectors';
 import { listConnectors, connectSource } from '../lib/connectors-api';
 import type { ToolCallInfo } from '../types';
 import { ToolCallCard } from '../components/Chat/ToolCallCard';
+import { AgentDataSourceAccessPanel } from '../components/AgentDataSourceAccessPanel';
 
 // ---------------------------------------------------------------------------
 // Status helpers
@@ -3778,6 +3779,9 @@ export function AgentsPage() {
                 </span>
               </div>
             </div>
+
+            {/* AG-9 Data Source Access (per-agent allowlist) */}
+            <AgentDataSourceAccessPanel agentId={selectedAgent.id} />
 
             {/* Hint for deep research agents */}
             {selectedAgent.agent_type === 'deep_research' && (
