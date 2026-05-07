@@ -86,6 +86,27 @@ def _access_view(agent: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# MC-4: per-channel-binding inbound sender allowlist patch payload.
+# Empty list means "no restriction" (existing behavior — allow all).
+class BindingAccessPatchRequest(BaseModel):
+    allowed_senders: List[str]
+
+
+def _binding_access_view(binding: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the response shape used by GET/PATCH ``/channels/{id}/access``."""
+    from openjarvis.channels.sender_filter import allowed_senders
+
+    config = binding.get("config") or {}
+    senders = allowed_senders(config)
+    return {
+        "binding_id": binding.get("id"),
+        "agent_id": binding.get("agent_id"),
+        "channel_type": binding.get("channel_type"),
+        "allowed_senders": senders,
+        "unrestricted": len(senders) == 0,
+    }
+
+
 _BROWSER_SUB_TOOLS = {
     "browser_navigate",
     "browser_click",
@@ -1768,6 +1789,57 @@ def create_agent_manager_router(
                     )
 
         return binding
+
+    # ── Channel binding inbound-sender allowlist (MC-4) ─────
+
+    @agents_router.get("/{agent_id}/channels/{binding_id}/access")
+    async def get_binding_access(agent_id: str, binding_id: str):
+        if not manager.get_agent(agent_id):
+            raise HTTPException(status_code=404, detail="Agent not found")
+        binding = manager._get_binding(binding_id)
+        if not binding or binding.get("agent_id") != agent_id:
+            raise HTTPException(status_code=404, detail="Binding not found")
+        return _binding_access_view(binding)
+
+    @agents_router.patch("/{agent_id}/channels/{binding_id}/access")
+    async def patch_binding_access(
+        agent_id: str,
+        binding_id: str,
+        req: BindingAccessPatchRequest,
+    ):
+        if not manager.get_agent(agent_id):
+            raise HTTPException(status_code=404, detail="Agent not found")
+        binding = manager._get_binding(binding_id)
+        if not binding or binding.get("agent_id") != agent_id:
+            raise HTTPException(status_code=404, detail="Binding not found")
+
+        # Reject empty-string entries; sender IDs are channel-specific
+        # so we don't enforce a format here, but blank entries are
+        # always invalid (would silently allow no-op matches).
+        cleaned: List[str] = []
+        bad: List[Any] = []
+        for raw in req.allowed_senders:
+            if not isinstance(raw, str) or not raw.strip():
+                bad.append(raw)
+                continue
+            s = raw.strip()
+            if s not in cleaned:
+                cleaned.append(s)
+        if bad:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"allowed_senders entries must be non-empty strings; "
+                    f"got invalid: {bad}"
+                ),
+            )
+
+        new_config = dict(binding.get("config") or {})
+        new_config["allowed_senders"] = cleaned
+        manager.update_channel_binding(binding_id, config=new_config)
+
+        refreshed = manager._get_binding(binding_id)
+        return _binding_access_view(refreshed)
 
     @agents_router.delete("/{agent_id}/channels/{binding_id}")
     async def unbind_channel(

@@ -73,6 +73,8 @@ class EventType(str, Enum):
     AGENT_CHECKPOINT_SAVED = "agent_checkpoint_saved"
     # Phase obs-1 — refusal observability for AG-9 / MC-4 enforcement
     DATA_SOURCE_REFUSED = "data_source_refused"
+    # Phase obs-2 — refusal observability for MC-4 sender allowlist
+    CHANNEL_MESSAGE_REFUSED = "channel_message_refused"
     # Phase 25 — Configuration Optimization
     OPTIMIZE_RUN_START = "optimize_run_start"
     OPTIMIZE_TRIAL_START = "optimize_trial_start"

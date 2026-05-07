@@ -16,7 +16,7 @@ from openjarvis.channels._stubs import (
     ChannelHandler,
     ChannelStatus,
 )
-from openjarvis.core.events import EventBus
+from openjarvis.core.events import EventBus, EventType
 from openjarvis.server.channel_bridge import ChannelBridge
 from openjarvis.server.session_store import SessionStore
 
@@ -186,3 +186,103 @@ class TestResponseFormatting:
         reply = bridge.handle_incoming("user1", "hi", "fake")
         assert reply == "short answer"
         assert "/more" not in reply
+
+
+class TestSenderAllowlistEnforcement:
+    """Phase 8 — handle_incoming consults
+    agent_manager.is_sender_allowed_for_channel and silently drops
+    refused senders before they touch the session store or
+    JarvisSystem.ask()."""
+
+    def test_no_agent_manager_no_op(self, bridge, mock_system):
+        # Default fixture has no agent_manager — pre-existing behavior
+        # must be preserved (no allowlist check, message goes through).
+        assert bridge._agent_manager is None
+        reply = bridge.handle_incoming("user1", "hello", "fake")
+        assert reply == "Hello from Jarvis!"
+        mock_system.ask.assert_called_once()
+
+    def test_allowed_sender_passes_through(self, bridge, mock_system):
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = True
+        bridge._agent_manager = mgr
+        reply = bridge.handle_incoming("user1", "hello", "fake")
+        assert reply == "Hello from Jarvis!"
+        mgr.is_sender_allowed_for_channel.assert_called_once_with("fake", "user1")
+        mock_system.ask.assert_called_once()
+
+    def test_refused_sender_returns_empty_no_chat(self, bridge, mock_system, store):
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = False
+        bridge._agent_manager = mgr
+        reply = bridge.handle_incoming("user_evil", "hello", "fake")
+        assert reply == ""
+        # JarvisSystem.ask must NOT be called for refused senders.
+        mock_system.ask.assert_not_called()
+
+    def test_refused_sender_does_not_create_session(self, bridge, mock_system, store):
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = False
+        bridge._agent_manager = mgr
+        bridge.handle_incoming("user_evil", "hello", "fake")
+        # Session must NOT have been touched (no conversation history).
+        sessions = store.get_notification_targets()
+        assert all(s["sender_id"] != "user_evil" for s in sessions)
+
+    def test_refused_sender_blocks_commands_too(self, bridge, mock_system):
+        # Refusal applies to commands as well — a refused sender can't
+        # invoke /help or /agents to enumerate capabilities.
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = False
+        bridge._agent_manager = mgr
+        reply = bridge.handle_incoming("user_evil", "/help", "fake")
+        assert reply == ""
+
+    def test_check_called_with_correct_args(self, bridge):
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = True
+        bridge._agent_manager = mgr
+        bridge.handle_incoming("user_x", "msg", "telegram")
+        mgr.is_sender_allowed_for_channel.assert_called_once_with("telegram", "user_x")
+
+
+class TestChannelMessageRefusedEvent:
+    """obs-2 — refused inbound messages emit CHANNEL_MESSAGE_REFUSED on
+    the event bus so monitoring/frontend can count drops without
+    parsing logs."""
+
+    def test_refused_sender_emits_event(self, bridge, mock_system, bus):
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = False
+        bridge._agent_manager = mgr
+        bridge.handle_incoming("user_evil", "hello", "fake")
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0].data["sender_id"] == "user_evil"
+        assert refused[0].data["channel_type"] == "fake"
+        assert refused[0].data["reason"] == "no_binding_allowlist_match"
+
+    def test_allowed_sender_emits_no_refusal_event(self, bridge, mock_system, bus):
+        mgr = MagicMock()
+        mgr.is_sender_allowed_for_channel.return_value = True
+        bridge._agent_manager = mgr
+        bridge.handle_incoming("user_ok", "hello", "fake")
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
+        ]
+        assert refused == []
+
+    def test_no_agent_manager_emits_no_refusal_event(self, bridge, mock_system, bus):
+        # Chat-only mode (no manager attached) must not emit refusal events
+        # — there's no allowlist policy to violate.
+        assert bridge._agent_manager is None
+        bridge.handle_incoming("user1", "hello", "fake")
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.CHANNEL_MESSAGE_REFUSED
+        ]
+        assert refused == []
