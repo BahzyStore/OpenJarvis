@@ -59,6 +59,33 @@ class FeedbackRequest(BaseModel):
     reason: Optional[str] = None
 
 
+# AG-9: per-agent data-source allowlist patch payload.
+class AccessPatchRequest(BaseModel):
+    allowed_data_sources: List[str]
+
+
+def _access_view(agent: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the response shape used by GET/PATCH ``/access``."""
+    from openjarvis.agents.access import allowed_data_sources
+
+    config = agent.get("config") or {}
+    allowed = allowed_data_sources(config)
+    # Populate the registry by importing the connectors package (each
+    # connector module registers itself on import as a side effect).
+    try:
+        import openjarvis.connectors  # noqa: F401
+        from openjarvis.core.registry import ConnectorRegistry
+
+        available = sorted(ConnectorRegistry.keys())
+    except Exception:
+        available = []
+    return {
+        "allowed_data_sources": allowed,
+        "available_data_sources": available,
+        "wildcard": "*" in allowed,
+    }
+
+
 _BROWSER_SUB_TOOLS = {
     "browser_navigate",
     "browser_click",
@@ -1319,13 +1346,18 @@ def create_agent_manager_router(
 
     @agents_router.post("")
     async def create_agent(req: CreateAgentRequest, request: Request):
+        # AG-9: default-deny — new agents start with an empty data-source
+        # allowlist unless the caller explicitly populates it.
+        config = dict(req.config or {})
+        config.setdefault("allowed_data_sources", [])
+
         if req.template_id:
             agent = manager.create_from_template(
-                req.template_id, req.name, overrides=req.config
+                req.template_id, req.name, overrides=config
             )
         else:
             agent = manager.create_agent(
-                name=req.name, agent_type=req.agent_type, config=req.config
+                name=req.name, agent_type=req.agent_type, config=config
             )
 
         # Register with scheduler if cron/interval
@@ -1440,6 +1472,58 @@ def create_agent_manager_router(
 
         threading.Thread(target=_run_tick, daemon=True).start()
         return {"status": "running", "agent_id": agent_id}
+
+    # ── Access — data-source allowlist (AG-9) ───────────────
+
+    @agents_router.get("/{agent_id}/access")
+    async def get_agent_access(agent_id: str):
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return _access_view(agent)
+
+    @agents_router.patch("/{agent_id}/access")
+    async def patch_agent_access(agent_id: str, req: AccessPatchRequest):
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Validate every entry against ConnectorRegistry. The wildcard
+        # "*" is always allowed; everything else must be a registered
+        # connector ID. Duplicates are de-duped while preserving order.
+        try:
+            import openjarvis.connectors  # noqa: F401  (registration side effect)
+            from openjarvis.core.registry import ConnectorRegistry
+
+            known = set(ConnectorRegistry.keys())
+        except Exception:
+            known = set()
+
+        cleaned: List[str] = []
+        unknown: List[str] = []
+        for raw in req.allowed_data_sources:
+            s = str(raw)
+            if s == "*" or s in known:
+                if s not in cleaned:
+                    cleaned.append(s)
+            else:
+                unknown.append(s)
+
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Unknown connector ID(s): {unknown}. "
+                    f"Use '*' to grant all, or one of the registered IDs."
+                ),
+            )
+
+        new_config = dict(agent.get("config") or {})
+        new_config["allowed_data_sources"] = cleaned
+        manager.update_agent(agent_id, config=new_config)
+
+        refreshed = manager.get_agent(agent_id)
+        return _access_view(refreshed)
 
     # ── Recover ──────────────────────────────────────────────
 
