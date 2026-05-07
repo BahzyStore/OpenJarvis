@@ -238,13 +238,17 @@ class ToolExecutor:
         # "data" or "knowledge" categories receive the kwarg, and an
         # explicit caller-provided value is preserved (test override
         # and explicit per-call grants still work).
-        if (
-            self._allowed_data_sources is not None
-            and tool.spec.category in ("data", "knowledge")
-            and isinstance(params, dict)
-            and "allowed_data_sources" not in params
-        ):
-            params["allowed_data_sources"] = list(self._allowed_data_sources)
+        if tool.spec.category in ("data", "knowledge") and isinstance(params, dict):
+            if (
+                self._allowed_data_sources is not None
+                and "allowed_data_sources" not in params
+            ):
+                params["allowed_data_sources"] = list(self._allowed_data_sources)
+            # `_agent_id` is dispatcher-trusted: tools that emit refusal
+            # events read it from params and include it in the payload so
+            # the per-client ws_bridge filter can target the originating
+            # agent. Always overwrite to prevent LLM-supplied spoofing.
+            params["_agent_id"] = self._agent_id
 
         # Emit start event
         if self._bus:

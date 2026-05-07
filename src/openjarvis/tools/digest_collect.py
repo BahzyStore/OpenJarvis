@@ -455,6 +455,7 @@ class DigestCollectTool(BaseTool):
                             "source_id": source,
                             "allowed_data_sources": list(allowed_data_sources_param),
                             "tool": "digest_collect",
+                            "agent_id": params.get("_agent_id"),
                         },
                     )
                     errors.append(f"Source '{source}' not permitted by agent allowlist")

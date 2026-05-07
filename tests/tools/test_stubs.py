@@ -290,3 +290,59 @@ class TestToolExecutorAllowedDataSources:
         executor.execute(ToolCall(id="2", name="recorder_data", arguments="{}"))
         # Second call must still see the original ["gmail"].
         assert tool.received_params["allowed_data_sources"] == ["gmail"]
+
+
+# ---------------------------------------------------------------------------
+# AG-9 telemetry: dispatcher-injected `_agent_id` for refusal-event payloads
+# ---------------------------------------------------------------------------
+
+
+class TestToolExecutorAgentIdInjection:
+    """The dispatcher injects `_agent_id` into params for AG-9-aware
+    tool categories so refusal-emit paths can include it in their event
+    payloads. Always overwrites any caller-supplied value to prevent
+    LLM-supplied spoofing."""
+
+    def test_injects_agent_id_for_data_category(self):
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool], agent_id="agent-42")
+        executor.execute(ToolCall(id="1", name="recorder_data", arguments="{}"))
+        assert tool.received_params.get("_agent_id") == "agent-42"
+
+    def test_injects_agent_id_for_knowledge_category(self):
+        tool = _CategoryRecorderTool("knowledge")
+        executor = ToolExecutor([tool], agent_id="agent-knows")
+        executor.execute(ToolCall(id="1", name="recorder_knowledge", arguments="{}"))
+        assert tool.received_params.get("_agent_id") == "agent-knows"
+
+    def test_does_not_inject_agent_id_for_other_categories(self):
+        tool = _CategoryRecorderTool("utility")
+        executor = ToolExecutor([tool], agent_id="agent-x")
+        executor.execute(ToolCall(id="1", name="recorder_utility", arguments="{}"))
+        # Non-AG-9 categories don't see the kwarg — keeps unrelated tools'
+        # param surfaces clean.
+        assert "_agent_id" not in tool.received_params
+
+    def test_overwrites_caller_supplied_agent_id_for_anti_spoofing(self):
+        # An LLM could put `_agent_id` in its tool-call arguments to spoof
+        # the originating agent. The dispatcher always overwrites with its
+        # trusted self._agent_id, regardless of what the caller passed.
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool], agent_id="trusted-agent")
+        executor.execute(
+            ToolCall(
+                id="1",
+                name="recorder_data",
+                arguments='{"_agent_id":"spoofed-agent"}',
+            )
+        )
+        assert tool.received_params["_agent_id"] == "trusted-agent"
+
+    def test_injects_empty_string_when_agent_id_unset(self):
+        # ToolExecutor.agent_id defaults to "" — that value must reach the
+        # tool transparently, not be elided as "no policy" (which is the
+        # contract for `allowed_data_sources`).
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool])
+        executor.execute(ToolCall(id="1", name="recorder_data", arguments="{}"))
+        assert tool.received_params.get("_agent_id") == ""

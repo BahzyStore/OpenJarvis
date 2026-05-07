@@ -126,6 +126,7 @@ class ScanChunksTool(BaseTool):
                         "source_id": source,
                         "allowed_data_sources": list(allowed_data_sources_param),
                         "tool": "scan_chunks",
+                        "agent_id": params.get("_agent_id"),
                     },
                 )
                 return ToolResult(
@@ -193,6 +194,7 @@ class ScanChunksTool(BaseTool):
                         "dropped_sources": sorted(dropped_sources),
                         "allowed_data_sources": list(allowed_data_sources_param),
                         "tool": "scan_chunks",
+                        "agent_id": params.get("_agent_id"),
                     },
                 )
             rows = kept

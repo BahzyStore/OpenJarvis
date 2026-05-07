@@ -94,6 +94,7 @@ class KnowledgeSQLTool(BaseTool):
                     "allowed_data_sources": list(allowed_data_sources_param),
                     "tool": "knowledge_sql",
                     "reason": "raw_sql_disabled_under_restricted_allowlist",
+                    "agent_id": params.get("_agent_id"),
                 },
             )
             return ToolResult(

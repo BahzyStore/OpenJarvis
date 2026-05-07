@@ -136,6 +136,7 @@ class KnowledgeSearchTool(BaseTool):
                         "source_id": source,
                         "allowed_data_sources": list(allowed_data_sources_param),
                         "tool": "knowledge_search",
+                        "agent_id": params.get("_agent_id"),
                     },
                 )
                 return ToolResult(
@@ -195,6 +196,7 @@ class KnowledgeSearchTool(BaseTool):
                         "dropped_sources": sorted(dropped_sources),
                         "allowed_data_sources": list(allowed_data_sources_param),
                         "tool": "knowledge_search",
+                        "agent_id": params.get("_agent_id"),
                     },
                 )
             results = kept

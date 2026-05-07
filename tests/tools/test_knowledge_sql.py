@@ -181,3 +181,36 @@ def test_no_kwarg_unchanged_behavior(store: KnowledgeStore) -> None:
 
     refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
     assert refused == []
+
+
+def test_refusal_includes_agent_id_via_dispatcher(store: KnowledgeStore) -> None:
+    """End-to-end: ToolExecutor injects _agent_id, the hard-deny emit
+    forwards it to the DATA_SOURCE_REFUSED payload."""
+    import json as _json
+
+    from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+    from openjarvis.core.types import ToolCall
+    from openjarvis.tools._stubs import ToolExecutor
+    from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
+
+    reset_event_bus()
+    bus = get_event_bus(record_history=True)
+
+    tool = KnowledgeSQLTool(store=store)
+    executor = ToolExecutor(
+        [tool],
+        agent_id="agent-sql-007",
+        allowed_data_sources=["gmail"],  # restricted → refused
+    )
+    executor.execute(
+        ToolCall(
+            id="1",
+            name="knowledge_sql",
+            arguments=_json.dumps({"query": "SELECT COUNT(*) FROM knowledge_chunks"}),
+        )
+    )
+
+    refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
+    assert len(refused) == 1
+    assert refused[0].data["agent_id"] == "agent-sql-007"
+    assert refused[0].data["tool"] == "knowledge_sql"

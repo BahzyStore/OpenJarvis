@@ -305,3 +305,40 @@ class TestKnowledgeSearchAllowlist:
         # One summary event listing all dropped sources.
         assert len(refused) == 1
         assert set(refused[0].data["dropped_sources"]) >= {"gmail", "slack"}
+
+    def test_refusal_includes_agent_id_via_dispatcher(self, store):
+        """End-to-end: ToolExecutor injects _agent_id, the tool's emit
+        path forwards it to the DATA_SOURCE_REFUSED payload."""
+        import json as _json
+
+        from openjarvis.core.events import (
+            EventType,
+            get_event_bus,
+            reset_event_bus,
+        )
+        from openjarvis.core.types import ToolCall
+        from openjarvis.tools._stubs import ToolExecutor
+
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+
+        tool = KnowledgeSearchTool(store=store)
+        executor = ToolExecutor(
+            [tool],
+            agent_id="agent-ksearch-007",
+            allowed_data_sources=["slack"],  # gmail will be refused
+        )
+        executor.execute(
+            ToolCall(
+                id="1",
+                name="knowledge_search",
+                arguments=_json.dumps({"query": "Kubernetes", "source": "gmail"}),
+            )
+        )
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0].data["agent_id"] == "agent-ksearch-007"
+        assert refused[0].data["source_id"] == "gmail"

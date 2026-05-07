@@ -221,3 +221,38 @@ def test_digest_collect_no_event_when_no_allowlist_configured():
 
     refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
     assert refused == []
+
+
+def test_digest_collect_refusal_includes_agent_id_via_dispatcher():
+    """End-to-end: ToolExecutor injects _agent_id, the tool's emit path
+    forwards it to the DATA_SOURCE_REFUSED payload."""
+    import json as _json
+
+    from openjarvis.core.events import EventType, get_event_bus
+    from openjarvis.core.types import ToolCall
+    from openjarvis.tools._stubs import ToolExecutor
+    from openjarvis.tools.digest_collect import DigestCollectTool
+
+    bus = get_event_bus(record_history=True)
+    tool = DigestCollectTool()
+    mock_cls = _make_mock_connector_cls("gmail")
+    executor = ToolExecutor(
+        [tool],
+        agent_id="agent-digest-007",
+        allowed_data_sources=["other_source"],  # gmail will be refused
+    )
+
+    with patch.object(ConnectorRegistry, "contains", return_value=True):
+        with patch.object(ConnectorRegistry, "get", return_value=mock_cls):
+            executor.execute(
+                ToolCall(
+                    id="1",
+                    name="digest_collect",
+                    arguments=_json.dumps({"sources": ["gmail"], "hours_back": 24}),
+                )
+            )
+
+    refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
+    assert len(refused) == 1
+    assert refused[0].data["agent_id"] == "agent-digest-007"
+    assert refused[0].data["source_id"] == "gmail"
