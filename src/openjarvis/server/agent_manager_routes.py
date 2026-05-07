@@ -59,6 +59,77 @@ class FeedbackRequest(BaseModel):
     reason: Optional[str] = None
 
 
+# AG-4: per-agent schedule patch payload. ``schedule_type`` ∈ {manual,
+# interval, cron}; ``schedule_value`` is an int (seconds, for interval)
+# or a cron expression string (for cron). Either field may be omitted —
+# unset fields fall back to the agent's existing config.
+class SchedulePatchRequest(BaseModel):
+    schedule_type: Optional[str] = None
+    schedule_value: Optional[Any] = None
+
+
+_VALID_SCHEDULE_TYPES = ("manual", "interval", "cron")
+
+
+def _validate_schedule(schedule_type: str, schedule_value: Any) -> Optional[str]:
+    """Return a human-readable error message if the schedule pair is
+    invalid, otherwise ``None``."""
+    if schedule_type not in _VALID_SCHEDULE_TYPES:
+        return (
+            f"unsupported schedule_type {schedule_type!r}; must be one of "
+            f"{', '.join(_VALID_SCHEDULE_TYPES)}"
+        )
+    if schedule_type == "manual":
+        return None
+    if schedule_type == "interval":
+        try:
+            seconds = int(schedule_value)
+        except (TypeError, ValueError):
+            return (
+                f"interval schedule_value must be an integer (seconds); got "
+                f"{schedule_value!r}"
+            )
+        if seconds < 1:
+            return "interval schedule_value must be >= 1 second"
+        return None
+    # cron
+    try:
+        from croniter import croniter
+    except ImportError:
+        return (
+            "cron schedules require the croniter package; install via "
+            "`pip install croniter` or the [scheduler] extra"
+        )
+    try:
+        croniter(str(schedule_value))
+    except Exception as exc:  # croniter raises various subclasses
+        return f"invalid cron expression {schedule_value!r}: {exc}"
+    return None
+
+
+def _schedule_view(scheduler: Any, agent: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the response shape used by GET/PATCH ``/schedule``."""
+    config = agent.get("config") or {}
+    sched_type = config.get("schedule_type", "manual")
+    sched_value = config.get("schedule_value")
+    next_run_at: Optional[float] = None
+    registered = False
+    if scheduler is not None:
+        try:
+            next_run_at = scheduler.get_next_fire(agent["id"])
+            registered = agent["id"] in scheduler.registered_agents
+        except Exception:
+            # Scheduler attached but missing the AG-4 accessor or in a bad
+            # state — degrade gracefully rather than 500.
+            pass
+    return {
+        "schedule_type": sched_type,
+        "schedule_value": sched_value,
+        "next_run_at": next_run_at,
+        "registered": registered,
+    }
+
+
 _BROWSER_SUB_TOOLS = {
     "browser_navigate",
     "browser_click",
@@ -1357,9 +1428,21 @@ def create_agent_manager_router(
         return manager.update_agent(agent_id, **kwargs)
 
     @agents_router.delete("/{agent_id}")
-    async def delete_agent(agent_id: str):
+    async def delete_agent(agent_id: str, request: Request):
         if not manager.get_agent(agent_id):
             raise HTTPException(status_code=404, detail="Agent not found")
+        # AG-4: deregister from the scheduler before archiving so future
+        # ticks never fire for a deleted agent.
+        scheduler = getattr(request.app.state, "agent_scheduler", None)
+        if scheduler is not None:
+            try:
+                scheduler.deregister_agent(agent_id)
+            except Exception:
+                logger.warning(
+                    "Failed to deregister agent %s from scheduler",
+                    agent_id,
+                    exc_info=True,
+                )
         manager.delete_agent(agent_id)
         return {"status": "archived"}
 
@@ -1440,6 +1523,70 @@ def create_agent_manager_router(
 
         threading.Thread(target=_run_tick, daemon=True).start()
         return {"status": "running", "agent_id": agent_id}
+
+    # ── Schedule (AG-4) ──────────────────────────────────────
+
+    @agents_router.get("/{agent_id}/schedule")
+    async def get_agent_schedule(agent_id: str, request: Request):
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        scheduler = getattr(request.app.state, "agent_scheduler", None)
+        return _schedule_view(scheduler, agent)
+
+    @agents_router.patch("/{agent_id}/schedule")
+    async def patch_agent_schedule(
+        agent_id: str,
+        req: SchedulePatchRequest,
+        request: Request,
+    ):
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        config = dict(agent.get("config") or {})
+        # Fall back to existing config for any field the caller omitted.
+        new_type = (
+            req.schedule_type
+            if req.schedule_type is not None
+            else config.get("schedule_type", "manual")
+        )
+        # `manual` ignores schedule_value; other types use the new value
+        # if provided, else the existing one.
+        if new_type == "manual":
+            new_value: Any = None
+        else:
+            new_value = (
+                req.schedule_value
+                if req.schedule_value is not None
+                else config.get("schedule_value")
+            )
+
+        err = _validate_schedule(new_type, new_value)
+        if err is not None:
+            raise HTTPException(status_code=422, detail=err)
+
+        config["schedule_type"] = new_type
+        config["schedule_value"] = new_value
+        manager.update_agent(agent_id, config=config)
+
+        # Auto-(de)register with the scheduler based on the new type.
+        scheduler = getattr(request.app.state, "agent_scheduler", None)
+        if scheduler is not None:
+            try:
+                if new_type in ("interval", "cron"):
+                    scheduler.register_agent(agent_id)
+                else:
+                    scheduler.deregister_agent(agent_id)
+            except Exception:
+                logger.warning(
+                    "Scheduler (de)register failed for agent %s",
+                    agent_id,
+                    exc_info=True,
+                )
+
+        refreshed = manager.get_agent(agent_id)
+        return _schedule_view(scheduler, refreshed)
 
     # ── Recover ──────────────────────────────────────────────
 

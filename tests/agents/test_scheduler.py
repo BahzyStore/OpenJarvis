@@ -137,3 +137,54 @@ class TestSchedulerBasic:
         scheduler.stop()
 
         executor.execute_tick.assert_not_called()
+
+    # ── get_next_fire (AG-4) ──────────────────────────────────
+
+    def test_get_next_fire_returns_none_for_unregistered(self, manager):
+        from openjarvis.agents.scheduler import AgentScheduler
+
+        scheduler = AgentScheduler(manager=manager, executor=MagicMock())
+        assert scheduler.get_next_fire("never-registered") is None
+
+    def test_get_next_fire_returns_timestamp_after_register(self, manager):
+        from openjarvis.agents.scheduler import AgentScheduler
+
+        scheduler = AgentScheduler(manager=manager, executor=MagicMock())
+        agent = manager.create_agent(
+            name="t",
+            agent_type="monitor_operative",
+            config={"schedule_type": "interval", "schedule_value": 60},
+        )
+        scheduler.register_agent(agent["id"])
+        nf = scheduler.get_next_fire(agent["id"])
+        assert nf is not None
+        # ~60 seconds in the future (allow a small tolerance for slow CI).
+        now = time.time()
+        assert now < nf <= now + 65
+
+    def test_get_next_fire_returns_none_for_manual_agent(self, manager):
+        """Manual-scheduled agents are stored with next_fire=inf — the
+        accessor returns None rather than leaking the sentinel."""
+        from openjarvis.agents.scheduler import AgentScheduler
+
+        scheduler = AgentScheduler(manager=manager, executor=MagicMock())
+        agent = manager.create_agent(
+            name="t",
+            agent_type="monitor_operative",
+            config={"schedule_type": "manual"},
+        )
+        scheduler.register_agent(agent["id"])
+        assert scheduler.get_next_fire(agent["id"]) is None
+
+    def test_get_next_fire_after_deregister_returns_none(self, manager):
+        from openjarvis.agents.scheduler import AgentScheduler
+
+        scheduler = AgentScheduler(manager=manager, executor=MagicMock())
+        agent = manager.create_agent(
+            name="t",
+            agent_type="monitor_operative",
+            config={"schedule_type": "interval", "schedule_value": 60},
+        )
+        scheduler.register_agent(agent["id"])
+        scheduler.deregister_agent(agent["id"])
+        assert scheduler.get_next_fire(agent["id"]) is None

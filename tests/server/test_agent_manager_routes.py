@@ -38,11 +38,10 @@ class TestAgentManagerRoutes:
 
         app = FastAPI()
         routers = create_agent_manager_router(manager)
-        agents_router, templates_router, global_router, tools_router = routers
-        app.include_router(agents_router)
-        app.include_router(templates_router)
-        app.include_router(global_router)
-        app.include_router(tools_router)
+        # create_agent_manager_router returns 5 routers since sendblue was
+        # added; the fixture unpacks all of them defensively.
+        for r in routers:
+            app.include_router(r)
         return TestClient(app)
 
     def test_list_agents_empty(self, client):
@@ -224,6 +223,217 @@ class TestAgentManagerRoutes:
         assert res.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Per-agent schedule (AG-4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_FASTAPI, reason="fastapi not installed")
+class TestAgentSchedule:
+    """Phase 4 — GET/PATCH /v1/managed-agents/{id}/schedule and
+    deregister-on-delete behavior."""
+
+    @pytest.fixture
+    def client(self, manager):
+        from fastapi import FastAPI
+
+        from openjarvis.server.agent_manager_routes import create_agent_manager_router
+
+        app = FastAPI()
+        for r in create_agent_manager_router(manager):
+            app.include_router(r)
+        return TestClient(app)
+
+    @pytest.fixture
+    def scheduler_client(self, manager):
+        """A TestClient with a real AgentScheduler attached to app.state.
+
+        The scheduler is NOT started — register/deregister exercise the
+        in-memory dict only, no background thread runs.
+        """
+        from fastapi import FastAPI
+
+        from openjarvis.agents.scheduler import AgentScheduler
+        from openjarvis.server.agent_manager_routes import create_agent_manager_router
+
+        app = FastAPI()
+        sched = AgentScheduler(manager=manager, executor=MagicMock())
+        app.state.agent_scheduler = sched
+        for r in create_agent_manager_router(manager):
+            app.include_router(r)
+        return TestClient(app), sched
+
+    # GET /schedule
+
+    def test_get_default_schedule(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        body = client.get(f"/v1/managed-agents/{agent_id}/schedule").json()
+        assert body["schedule_type"] == "manual"
+        assert body["next_run_at"] is None
+        assert body["registered"] is False
+
+    def test_get_schedule_404_for_unknown(self, client):
+        assert client.get("/v1/managed-agents/nope/schedule").status_code == 404
+
+    def test_get_schedule_with_scheduler_attached(self, scheduler_client):
+        client, _sched = scheduler_client
+        agent_id = client.post(
+            "/v1/managed-agents",
+            json={
+                "name": "a",
+                "config": {
+                    "schedule_type": "interval",
+                    "schedule_value": 30,
+                },
+            },
+        ).json()["id"]
+        body = client.get(f"/v1/managed-agents/{agent_id}/schedule").json()
+        assert body["schedule_type"] == "interval"
+        assert body["schedule_value"] == 30
+        assert body["registered"] is True
+        assert body["next_run_at"] is not None
+        assert isinstance(body["next_run_at"], (int, float))
+
+    # PATCH /schedule — happy paths
+
+    def test_patch_to_interval(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "interval", "schedule_value": 60},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["schedule_type"] == "interval"
+        assert body["schedule_value"] == 60
+
+    def test_patch_to_cron(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "cron", "schedule_value": "0 9 * * *"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["schedule_type"] == "cron"
+        assert resp.json()["schedule_value"] == "0 9 * * *"
+
+    def test_patch_to_manual(self, client):
+        agent_id = client.post(
+            "/v1/managed-agents",
+            json={
+                "name": "a",
+                "config": {
+                    "schedule_type": "interval",
+                    "schedule_value": 60,
+                },
+            },
+        ).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "manual"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["schedule_type"] == "manual"
+        assert resp.json()["schedule_value"] is None
+
+    # PATCH /schedule — validation
+
+    def test_patch_invalid_cron_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "cron", "schedule_value": "not a cron"},
+        )
+        assert resp.status_code == 422
+        assert "cron" in str(resp.json().get("detail", "")).lower()
+
+    def test_patch_non_int_interval_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "interval", "schedule_value": "soon"},
+        )
+        assert resp.status_code == 422
+
+    def test_patch_zero_interval_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "interval", "schedule_value": 0},
+        )
+        assert resp.status_code == 422
+
+    def test_patch_unknown_schedule_type_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "every-other-day", "schedule_value": 1},
+        )
+        assert resp.status_code == 422
+
+    def test_patch_404_for_unknown_agent(self, client):
+        resp = client.patch(
+            "/v1/managed-agents/nope/schedule",
+            json={"schedule_type": "interval", "schedule_value": 60},
+        )
+        assert resp.status_code == 404
+
+    # PATCH /schedule — scheduler side effects
+
+    def test_patch_to_interval_registers_with_scheduler(self, scheduler_client):
+        client, sched = scheduler_client
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        # Default schedule_type is "manual" → not auto-registered on create.
+        assert agent_id not in sched.registered_agents
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "interval", "schedule_value": 30},
+        )
+        assert resp.status_code == 200
+        assert agent_id in sched.registered_agents
+        assert resp.json()["registered"] is True
+        assert resp.json()["next_run_at"] is not None
+
+    def test_patch_to_manual_deregisters(self, scheduler_client):
+        client, sched = scheduler_client
+        agent_id = client.post(
+            "/v1/managed-agents",
+            json={
+                "name": "a",
+                "config": {
+                    "schedule_type": "interval",
+                    "schedule_value": 30,
+                },
+            },
+        ).json()["id"]
+        # Auto-registered on create (existing behavior).
+        assert agent_id in sched.registered_agents
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/schedule",
+            json={"schedule_type": "manual"},
+        )
+        assert resp.status_code == 200
+        assert agent_id not in sched.registered_agents
+
+    # DELETE side effect
+
+    def test_delete_deregisters_from_scheduler(self, scheduler_client):
+        client, sched = scheduler_client
+        agent_id = client.post(
+            "/v1/managed-agents",
+            json={
+                "name": "a",
+                "config": {
+                    "schedule_type": "interval",
+                    "schedule_value": 30,
+                },
+            },
+        ).json()["id"]
+        assert agent_id in sched.registered_agents
+        client.delete(f"/v1/managed-agents/{agent_id}")
+        assert agent_id not in sched.registered_agents
+
+
 def test_run_agent_concurrent_returns_409(tmp_path):
     """Rapid Run Now clicks should not spawn multiple ticks."""
     from openjarvis.agents.manager import AgentManager
@@ -287,11 +497,10 @@ class TestAgentManagerStreaming:
         app.state.bus = None
 
         routers = create_agent_manager_router(manager)
-        agents_router, templates_router, global_router, tools_router = routers
-        app.include_router(agents_router)
-        app.include_router(templates_router)
-        app.include_router(global_router)
-        app.include_router(tools_router)
+        # create_agent_manager_router returns 5 routers since sendblue was
+        # added; the fixture unpacks all of them defensively.
+        for r in routers:
+            app.include_router(r)
         return TestClient(app)
 
     def test_send_message_stream(self, manager, stream_client):

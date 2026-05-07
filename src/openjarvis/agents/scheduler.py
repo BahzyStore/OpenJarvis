@@ -72,6 +72,22 @@ class AgentScheduler:
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
+    def get_next_fire(self, agent_id: str) -> float | None:
+        """Return the unix timestamp at which *agent_id* will next fire,
+        or ``None`` if the agent is not registered. Returns ``None``
+        rather than ``inf`` for ``manual``-scheduled agents (which never
+        auto-fire) — callers expecting a finite float should compare
+        against ``None`` first.
+        """
+        with self._lock:
+            entry = self._agents.get(agent_id)
+        if entry is None:
+            return None
+        nf = entry.get("next_fire")
+        if nf is None or nf == float("inf"):
+            return None
+        return float(nf)
+
     def register_agent(self, agent_id: str) -> None:
         """Register an agent for scheduling."""
         agent = self._manager.get_agent(agent_id)
