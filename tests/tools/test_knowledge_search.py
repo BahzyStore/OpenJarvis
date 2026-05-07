@@ -153,3 +153,155 @@ def test_tool_uses_two_stage_retriever(tmp_path: Path) -> None:
     result = tool.execute(query="deep learning")
     assert result.success
     assert result.metadata["num_results"] > 0
+
+
+# ---------------------------------------------------------------------------
+# AG-9: per-agent data-source allowlist enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestKnowledgeSearchAllowlist:
+    """Enforce AG-9 allowlist for both explicit-source and unfiltered queries."""
+
+    def test_explicit_source_denied_refuses(self, store):
+        from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+
+        # Reset to discard any MEMORY_STORE events emitted during the
+        # `store` fixture's setup, which created the singleton with
+        # record_history=False (the kwarg only applies on first creation).
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+        tool = KnowledgeSearchTool(store=store)
+        result = tool.execute(
+            query="Kubernetes",
+            source="gmail",
+            allowed_data_sources=["slack"],
+        )
+        assert result.success is False
+        assert "not permitted by agent allowlist" in result.content
+        assert result.metadata["refused_source"] == "gmail"
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0].data["source_id"] == "gmail"
+        assert refused[0].data["tool"] == "knowledge_search"
+        assert refused[0].data["allowed_data_sources"] == ["slack"]
+
+    def test_explicit_source_allowed_passes(self, store):
+        from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+
+        # Reset to discard any MEMORY_STORE events emitted during the
+        # `store` fixture's setup, which created the singleton with
+        # record_history=False (the kwarg only applies on first creation).
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+        tool = KnowledgeSearchTool(store=store)
+        result = tool.execute(
+            query="Kubernetes",
+            source="gmail",
+            allowed_data_sources=["gmail"],
+        )
+        assert result.success is True
+        assert "gmail" in result.content
+        assert "slack" not in result.content
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        assert refused == []
+
+    def test_no_source_post_filters_results(self, store):
+        from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+
+        # Reset to discard any MEMORY_STORE events emitted during the
+        # `store` fixture's setup, which created the singleton with
+        # record_history=False (the kwarg only applies on first creation).
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+        tool = KnowledgeSearchTool(store=store)
+        # Query "K8s" matches both gmail (item 1) and slack (item 2).
+        # Allowing only gmail should drop the slack result and emit one event.
+        result = tool.execute(
+            query="K8s",
+            allowed_data_sources=["gmail"],
+        )
+        assert result.success is True
+        assert "gmail" in result.content
+        assert "slack" not in result.content
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        assert len(refused) == 1
+        assert refused[0].data["source_id"] is None
+        assert "slack" in refused[0].data["dropped_sources"]
+        assert refused[0].data["tool"] == "knowledge_search"
+
+    def test_no_kwarg_unchanged_behavior(self, store):
+        from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+
+        # Reset to discard any MEMORY_STORE events emitted during the
+        # `store` fixture's setup, which created the singleton with
+        # record_history=False (the kwarg only applies on first creation).
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+        tool = KnowledgeSearchTool(store=store)
+        result = tool.execute(query="K8s")  # no allowlist kwarg
+        assert result.success is True
+        # Both gmail + slack results returned (no allowlist applied)
+        assert "gmail" in result.content
+        assert "slack" in result.content
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        assert refused == []
+
+    def test_wildcard_allows_everything(self, store):
+        from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+
+        # Reset to discard any MEMORY_STORE events emitted during the
+        # `store` fixture's setup, which created the singleton with
+        # record_history=False (the kwarg only applies on first creation).
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+        tool = KnowledgeSearchTool(store=store)
+        result = tool.execute(
+            query="K8s",
+            allowed_data_sources=["*"],
+        )
+        assert result.success is True
+        # Wildcard preserves unfiltered behavior — both sources kept.
+        assert "gmail" in result.content
+        assert "slack" in result.content
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        assert refused == []
+
+    def test_empty_allowlist_drops_all_in_post_filter(self, store):
+        from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+
+        # Reset to discard any MEMORY_STORE events emitted during the
+        # `store` fixture's setup, which created the singleton with
+        # record_history=False (the kwarg only applies on first creation).
+        reset_event_bus()
+        bus = get_event_bus(record_history=True)
+        tool = KnowledgeSearchTool(store=store)
+        result = tool.execute(
+            query="K8s",
+            allowed_data_sources=[],
+        )
+        # Every result dropped → "No relevant results" path.
+        assert result.success is True
+        assert result.metadata["num_results"] == 0
+
+        refused = [
+            e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED
+        ]
+        # One summary event listing all dropped sources.
+        assert len(refused) == 1
+        assert set(refused[0].data["dropped_sources"]) >= {"gmail", "slack"}
