@@ -105,6 +105,36 @@ class ScanChunksTool(BaseTool):
         max_chunks: int = int(params.get("max_chunks", _DEFAULT_MAX_CHUNKS))
         batch_size: int = _DEFAULT_BATCH_SIZE
 
+        # AG-9: optional harness-injected per-agent data-source allowlist.
+        # When present, refuse explicit denied sources up front and
+        # post-filter unfiltered queries BEFORE feeding rows to the LLM.
+        # None = no policy (legacy behavior).
+        allowed_data_sources_param = params.get("allowed_data_sources")
+
+        if allowed_data_sources_param is not None and source:
+            from openjarvis.agents.access import is_data_source_allowed
+
+            if not is_data_source_allowed(
+                {"allowed_data_sources": allowed_data_sources_param},
+                source,
+            ):
+                from openjarvis.core.events import EventType, get_event_bus
+
+                get_event_bus().publish(
+                    EventType.DATA_SOURCE_REFUSED,
+                    {
+                        "source_id": source,
+                        "allowed_data_sources": list(allowed_data_sources_param),
+                        "tool": "scan_chunks",
+                    },
+                )
+                return ToolResult(
+                    tool_name="scan_chunks",
+                    content=(f"Source '{source}' not permitted by agent allowlist."),
+                    success=False,
+                    metadata={"chunks_scanned": 0, "refused_source": source},
+                )
+
         where_clauses: List[str] = []
         sql_params: List[Any] = []
 
@@ -132,6 +162,40 @@ class ScanChunksTool(BaseTool):
         sql_params.append(max_chunks)
 
         rows = self._store._conn.execute(sql, sql_params).fetchall()
+
+        # AG-9 post-filter: when allowlist is set and source wasn't pinned,
+        # drop rows from sources not on the allowlist BEFORE feeding to the
+        # LLM. This is the core security property — denied content must
+        # never enter a prompt. Emit one summary event listing the unique
+        # dropped sources.
+        if allowed_data_sources_param is not None and not source and rows:
+            from openjarvis.agents.access import is_data_source_allowed
+
+            kept = []
+            dropped_sources: set[str] = set()
+            for row in rows:
+                row_source = row["source"] or ""
+                if is_data_source_allowed(
+                    {"allowed_data_sources": allowed_data_sources_param},
+                    row_source,
+                ):
+                    kept.append(row)
+                elif row_source:
+                    dropped_sources.add(row_source)
+
+            if dropped_sources:
+                from openjarvis.core.events import EventType, get_event_bus
+
+                get_event_bus().publish(
+                    EventType.DATA_SOURCE_REFUSED,
+                    {
+                        "source_id": None,
+                        "dropped_sources": sorted(dropped_sources),
+                        "allowed_data_sources": list(allowed_data_sources_param),
+                        "tool": "scan_chunks",
+                    },
+                )
+            rows = kept
 
         if not rows:
             return ToolResult(
