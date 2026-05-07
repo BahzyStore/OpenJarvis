@@ -196,3 +196,97 @@ class TestToolExecutor:
         executor = ToolExecutor([])
         assert executor.available_tools() == []
         assert executor.get_openai_tools() == []
+
+
+# ---------------------------------------------------------------------------
+# AG-9 auto-injection of allowed_data_sources
+# ---------------------------------------------------------------------------
+
+
+class _CategoryRecorderTool(BaseTool):
+    """Tool that records the params it received under a configurable category."""
+
+    def __init__(self, category: str) -> None:
+        self._category = category
+        self.received_params: dict = {}
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=f"recorder_{self._category}",
+            description="Records params it was called with.",
+            parameters={"type": "object", "properties": {}},
+            category=self._category,
+        )
+
+    def execute(self, **params) -> ToolResult:
+        self.received_params = dict(params)
+        return ToolResult(tool_name=self.spec.name, content="ok", success=True)
+
+
+class TestToolExecutorAllowedDataSources:
+    """AG-9 architectural fix — dispatcher auto-injects the agent's
+    data-source allowlist into AG-9-aware tool params, eliminating the
+    per-call-site kwarg plumbing that Phases 9/12/13/14 worked around."""
+
+    def test_injects_into_data_category(self):
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool], allowed_data_sources=["gmail", "slack"])
+        executor.execute(ToolCall(id="1", name="recorder_data", arguments="{}"))
+        assert tool.received_params.get("allowed_data_sources") == [
+            "gmail",
+            "slack",
+        ]
+
+    def test_injects_into_knowledge_category(self):
+        tool = _CategoryRecorderTool("knowledge")
+        executor = ToolExecutor([tool], allowed_data_sources=["*"])
+        executor.execute(ToolCall(id="1", name="recorder_knowledge", arguments="{}"))
+        assert tool.received_params.get("allowed_data_sources") == ["*"]
+
+    def test_does_not_inject_into_other_categories(self):
+        tool = _CategoryRecorderTool("utility")
+        executor = ToolExecutor([tool], allowed_data_sources=["gmail"])
+        executor.execute(ToolCall(id="1", name="recorder_utility", arguments="{}"))
+        # The kwarg must NOT be passed to non-AG-9 categories — keeps
+        # unrelated tools' param surfaces clean.
+        assert "allowed_data_sources" not in tool.received_params
+
+    def test_none_allowlist_means_no_injection(self):
+        tool = _CategoryRecorderTool("data")
+        # allowed_data_sources defaults to None → legacy path.
+        executor = ToolExecutor([tool])
+        executor.execute(ToolCall(id="1", name="recorder_data", arguments="{}"))
+        assert "allowed_data_sources" not in tool.received_params
+
+    def test_does_not_overwrite_explicit_caller_value(self):
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool], allowed_data_sources=["dispatcher_default"])
+        # Caller passes their own value via tool_call args — must win.
+        executor.execute(
+            ToolCall(
+                id="1",
+                name="recorder_data",
+                arguments='{"allowed_data_sources":["caller_override"]}',
+            )
+        )
+        assert tool.received_params["allowed_data_sources"] == ["caller_override"]
+
+    def test_empty_allowlist_is_passed_through(self):
+        # Empty list = deny-all (Phase 5 semantics). Must reach the tool.
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool], allowed_data_sources=[])
+        executor.execute(ToolCall(id="1", name="recorder_data", arguments="{}"))
+        assert tool.received_params.get("allowed_data_sources") == []
+
+    def test_each_call_gets_independent_list_copy(self):
+        # The dispatcher copies its list per-call so a tool that mutates
+        # the kwarg can't leak state across calls.
+        tool = _CategoryRecorderTool("data")
+        executor = ToolExecutor([tool], allowed_data_sources=["gmail"])
+        executor.execute(ToolCall(id="1", name="recorder_data", arguments="{}"))
+        first = tool.received_params["allowed_data_sources"]
+        first.append("mutated")  # nosec — we want to test isolation
+        executor.execute(ToolCall(id="2", name="recorder_data", arguments="{}"))
+        # Second call must still see the original ["gmail"].
+        assert tool.received_params["allowed_data_sources"] == ["gmail"]

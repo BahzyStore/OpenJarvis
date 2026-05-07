@@ -325,3 +325,17 @@ class TestToolUsingAgent:
 
         assert result.success is True
         confirm.assert_called_once()
+
+    def test_forwards_allowed_data_sources_to_executor(self):
+        # AG-9: ToolUsingAgent must thread the allowlist through to the
+        # ToolExecutor so the dispatcher can auto-inject it into AG-9-aware
+        # tool params without each agent's caller having to plumb it.
+        engine = MagicMock()
+        agent = _ConcreteToolAgent(engine, "m", allowed_data_sources=["gmail", "slack"])
+        assert agent._executor._allowed_data_sources == ["gmail", "slack"]
+
+    def test_default_allowed_data_sources_is_none(self):
+        engine = MagicMock()
+        agent = _ConcreteToolAgent(engine, "m")
+        # Default = None preserves legacy behavior — no kwarg is injected.
+        assert agent._executor._allowed_data_sources is None

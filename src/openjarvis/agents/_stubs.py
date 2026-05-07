@@ -307,6 +307,7 @@ class ToolUsingAgent(BaseAgent):
         interactive: bool = False,
         confirm_callback: Optional[Any] = None,
         skill_few_shot_examples: Optional[List[str]] = None,
+        allowed_data_sources: Optional[List[str]] = None,
     ) -> None:
         super().__init__(
             engine,
@@ -329,6 +330,7 @@ class ToolUsingAgent(BaseAgent):
             agent_id=_aid,
             interactive=interactive,
             confirm_callback=confirm_callback,
+            allowed_data_sources=allowed_data_sources,
         )
         # Resolve max_turns: explicit arg > config > class default > 10
         if max_turns is not None:

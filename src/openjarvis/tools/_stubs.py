@@ -107,6 +107,7 @@ class ToolExecutor:
         capability_policy: Optional[Any] = None,
         agent_id: str = "",
         boundary_guard: Optional[Any] = None,
+        allowed_data_sources: Optional[List[str]] = None,
     ) -> None:
         self._tools: Dict[str, BaseTool] = {t.spec.name: t for t in tools}
         self._bus = bus
@@ -116,6 +117,12 @@ class ToolExecutor:
         self._capability_policy = capability_policy
         self._agent_id = agent_id
         self._boundary_guard = boundary_guard
+        # AG-9: when set, the executor injects this list as the
+        # `allowed_data_sources` kwarg into every dispatched tool whose
+        # spec.category is "data" or "knowledge". None = no policy
+        # (legacy behavior — tools that look up the kwarg see None and
+        # fall through to their unrestricted path).
+        self._allowed_data_sources = allowed_data_sources
 
     def execute(self, tool_call: ToolCall) -> ToolResult:
         """Parse arguments, dispatch to tool, measure latency, emit events."""
@@ -224,6 +231,20 @@ class ToolExecutor:
                     content=f"Tool '{tool_call.name}' execution denied by user.",
                     success=False,
                 )
+
+        # AG-9: auto-inject the per-agent data-source allowlist into
+        # AG-9-aware tool params. This is the architectural fix that
+        # retires per-call-site kwarg plumbing — only tools in the
+        # "data" or "knowledge" categories receive the kwarg, and an
+        # explicit caller-provided value is preserved (test override
+        # and explicit per-call grants still work).
+        if (
+            self._allowed_data_sources is not None
+            and tool.spec.category in ("data", "knowledge")
+            and isinstance(params, dict)
+            and "allowed_data_sources" not in params
+        ):
+            params["allowed_data_sources"] = list(self._allowed_data_sources)
 
         # Emit start event
         if self._bus:
