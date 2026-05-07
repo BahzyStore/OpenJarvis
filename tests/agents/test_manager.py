@@ -134,6 +134,96 @@ class TestChannelBindings:
         assert len(manager.list_channel_bindings(agent["id"])) == 0
 
 
+class TestSenderAllowlistAggregate:
+    """Phase 8 — manager.is_sender_allowed_for_channel aggregates the
+    per-binding allowlists from sender_filter (Phase 7) across every
+    binding for a given channel_type."""
+
+    def test_no_bindings_allows_all(self, manager):
+        # No binding for this channel type → no policy → allow.
+        assert manager.is_sender_allowed_for_channel("slack", "U123") is True
+
+    def test_unrestricted_binding_allows_all(self, manager):
+        agent = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(agent["id"], channel_type="slack", config={})
+        # No allowed_senders set → unrestricted → allow.
+        assert manager.is_sender_allowed_for_channel("slack", "U123") is True
+
+    def test_restricted_binding_with_match_allows(self, manager):
+        agent = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(
+            agent["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U123", "U456"]},
+        )
+        assert manager.is_sender_allowed_for_channel("slack", "U123") is True
+
+    def test_restricted_binding_without_match_denies(self, manager):
+        agent = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(
+            agent["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U123"]},
+        )
+        assert manager.is_sender_allowed_for_channel("slack", "U999") is False
+
+    def test_two_bindings_one_restricts_one_unrestricted_allows(self, manager):
+        # Aggregate: unrestricted binding makes the channel allow-all.
+        a1 = manager.create_agent(name="a1", agent_type="simple")
+        a2 = manager.create_agent(name="a2", agent_type="simple")
+        manager.bind_channel(
+            a1["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U123"]},
+        )
+        manager.bind_channel(a2["id"], channel_type="slack", config={})
+        # U999 is not in the restricted binding's list, but the second
+        # binding is unrestricted — aggregate semantics allow.
+        assert manager.is_sender_allowed_for_channel("slack", "U999") is True
+
+    def test_two_restricted_bindings_sender_in_one_allows(self, manager):
+        a1 = manager.create_agent(name="a1", agent_type="simple")
+        a2 = manager.create_agent(name="a2", agent_type="simple")
+        manager.bind_channel(
+            a1["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U111"]},
+        )
+        manager.bind_channel(
+            a2["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U222"]},
+        )
+        # Sender appears in one of the lists → allow.
+        assert manager.is_sender_allowed_for_channel("slack", "U222") is True
+
+    def test_two_restricted_bindings_sender_in_neither_denies(self, manager):
+        a1 = manager.create_agent(name="a1", agent_type="simple")
+        a2 = manager.create_agent(name="a2", agent_type="simple")
+        manager.bind_channel(
+            a1["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U111"]},
+        )
+        manager.bind_channel(
+            a2["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U222"]},
+        )
+        assert manager.is_sender_allowed_for_channel("slack", "U999") is False
+
+    def test_other_channel_type_unaffected(self, manager):
+        # A restriction on slack must not affect telegram.
+        agent = manager.create_agent(name="a", agent_type="simple")
+        manager.bind_channel(
+            agent["id"],
+            channel_type="slack",
+            config={"allowed_senders": ["U123"]},
+        )
+        # Telegram has no bindings → allow all senders.
+        assert manager.is_sender_allowed_for_channel("telegram", "12345") is True
+
+
 class TestSummaryMemory:
     def test_initial_summary_empty(self, manager):
         agent = manager.create_agent(name="test", agent_type="simple")

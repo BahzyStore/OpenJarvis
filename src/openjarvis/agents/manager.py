@@ -412,9 +412,89 @@ class AgentManager:
         ).fetchall()
         return [self._row_to_binding(r) for r in rows]
 
+    def update_channel_binding(
+        self,
+        binding_id: str,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        routing_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update mutable fields on a channel binding (MC-4).
+
+        Only fields whose kwargs are non-``None`` are updated. Returns
+        the refreshed binding dict, or ``None`` if no binding exists for
+        *binding_id*.
+        """
+        sets: List[str] = []
+        vals: List[Any] = []
+        if config is not None:
+            sets.append("config_json = ?")
+            vals.append(json.dumps(config))
+        if routing_mode is not None:
+            sets.append("routing_mode = ?")
+            vals.append(routing_mode)
+        if session_id is not None:
+            sets.append("session_id = ?")
+            vals.append(session_id)
+        if not sets:
+            return self._get_binding(binding_id)
+        vals.append(binding_id)
+        self._conn.execute(
+            f"UPDATE channel_bindings SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+        self._conn.commit()
+        return self._get_binding(binding_id)
+
     def unbind_channel(self, binding_id: str) -> None:
         self._conn.execute("DELETE FROM channel_bindings WHERE id = ?", (binding_id,))
         self._conn.commit()
+
+    def is_sender_allowed_for_channel(
+        self,
+        channel_type: str,
+        sender_id: str,
+    ) -> bool:
+        """Permissive aggregate sender check across all bindings of
+        *channel_type*.
+
+        Used by :class:`ChannelBridge` to drop inbound messages that no
+        binding accepts (MC-4). Each binding owns its own allowlist
+        scope; an unrelated binding's restriction does NOT close the
+        door on another binding that's intentionally left unrestricted.
+
+        Returns ``True`` when **any** binding accepts the sender:
+
+        * No bindings exist for *channel_type* (no policy applies), or
+        * At least one binding is unrestricted (``allowed_senders``
+          empty / unset) — that binding accepts every sender, and
+          permissive aggregation lets the message through, or
+        * At least one binding's allowlist contains *sender_id*.
+
+        Returns ``False`` only when **every** binding has a non-empty
+        allowlist AND none of them contain *sender_id*.
+        """
+        from openjarvis.channels.sender_filter import allowed_senders
+
+        rows = self._conn.execute(
+            "SELECT * FROM channel_bindings WHERE channel_type = ?",
+            (channel_type,),
+        ).fetchall()
+        bindings = [self._row_to_binding(r) for r in rows]
+        if not bindings:
+            return True  # no policy
+
+        for b in bindings:
+            senders = allowed_senders(b.get("config") or {})
+            if not senders:
+                # Unrestricted binding accepts every sender; under
+                # permissive aggregation that's enough to let the
+                # message through.
+                return True
+            if sender_id in senders:
+                return True
+        return False
 
     def _get_binding(self, binding_id: str) -> Optional[Dict[str, Any]]:
         row = self._conn.execute(

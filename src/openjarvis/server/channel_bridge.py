@@ -121,6 +121,32 @@ class ChannelBridge:
         metadata: Optional[Dict[str, Any]] = None,
         max_length: int = _DEFAULT_MAX_LENGTH,
     ) -> str:
+        # MC-4: drop messages from senders not permitted by any binding's
+        # allowlist for this channel_type. No-op when no agent_manager is
+        # attached (chat-only mode preserves existing behavior).
+        if (
+            self._agent_manager is not None
+            and not self._agent_manager.is_sender_allowed_for_channel(
+                channel_type, sender_id
+            )
+        ):
+            logger.info(
+                "Dropping inbound message: sender %s not permitted on %s "
+                "(no binding allowlist match)",
+                sender_id,
+                channel_type,
+            )
+            # obs-2: emit refusal event for monitoring/frontend hooks.
+            self._bus.publish(
+                EventType.CHANNEL_MESSAGE_REFUSED,
+                {
+                    "sender_id": sender_id,
+                    "channel_type": channel_type,
+                    "reason": "no_binding_allowlist_match",
+                },
+            )
+            return ""
+
         self._session_store.get_or_create(sender_id, channel_type)
 
         # Command routing

@@ -28,6 +28,12 @@ _AGENT_EVENTS = {
     EventType.TOOL_CALL_END,
     EventType.INFERENCE_START,
     EventType.INFERENCE_END,
+    # obs-3: refusal events from AG-9 (data-source allowlist) and MC-4
+    # (channel sender allowlist). Surface them in the webview agent
+    # inspector so users can see when access is denied without grepping
+    # logs.
+    EventType.DATA_SOURCE_REFUSED,
+    EventType.CHANNEL_MESSAGE_REFUSED,
 }
 
 

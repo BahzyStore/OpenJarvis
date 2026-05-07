@@ -356,6 +356,151 @@ class TestAgentAccess:
         assert resp.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Per-channel-binding inbound sender allowlist (MC-4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_FASTAPI, reason="fastapi not installed")
+class TestChannelBindingAccess:
+    """Phase 7 — GET/PATCH /v1/managed-agents/{id}/channels/{bid}/access.
+
+    The allowlist is opt-in: an empty list means no restriction (existing
+    behavior — allow all senders). Setting it populates a filter that a
+    future enforcement wiring in ChannelBridge will consult.
+    """
+
+    @pytest.fixture
+    def client(self, manager):
+        from fastapi import FastAPI
+
+        from openjarvis.server.agent_manager_routes import create_agent_manager_router
+
+        app = FastAPI()
+        for r in create_agent_manager_router(manager):
+            app.include_router(r)
+        return TestClient(app)
+
+    @pytest.fixture
+    def bound_agent(self, client):
+        """Create an agent with a slack binding and yield (agent_id, binding_id)."""
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        bind_resp = client.post(
+            f"/v1/managed-agents/{agent_id}/channels",
+            json={"channel_type": "slack", "config": {}},
+        )
+        binding_id = bind_resp.json()["id"]
+        return agent_id, binding_id
+
+    def test_get_default_unrestricted(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        body = client.get(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access"
+        ).json()
+        assert body["allowed_senders"] == []
+        assert body["unrestricted"] is True
+        assert body["binding_id"] == binding_id
+        assert body["agent_id"] == agent_id
+        assert body["channel_type"] == "slack"
+
+    def test_get_404_unknown_agent(self, client):
+        resp = client.get("/v1/managed-agents/nope/channels/whatever/access")
+        assert resp.status_code == 404
+
+    def test_get_404_unknown_binding(self, client, bound_agent):
+        agent_id, _ = bound_agent
+        resp = client.get(
+            f"/v1/managed-agents/{agent_id}/channels/no-such-binding/access"
+        )
+        assert resp.status_code == 404
+
+    def test_get_404_binding_belongs_to_other_agent(self, client, bound_agent):
+        # Create a second agent + binding, then try to access agent A's
+        # binding under agent B's URL — should 404.
+        agent_a, binding_a = bound_agent
+        agent_b = client.post("/v1/managed-agents", json={"name": "b"}).json()["id"]
+        resp = client.get(f"/v1/managed-agents/{agent_b}/channels/{binding_a}/access")
+        assert resp.status_code == 404
+
+    def test_patch_sets_allowlist(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": ["U123ABC", "U456DEF"]},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["allowed_senders"] == ["U123ABC", "U456DEF"]
+        assert body["unrestricted"] is False
+
+    def test_patch_empty_list_resets_to_unrestricted(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": ["U123"]},
+        )
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": []},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["allowed_senders"] == []
+        assert body["unrestricted"] is True
+
+    def test_patch_dedupes_repeated_entries(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": ["U1", "U1", "U2"]},
+        )
+        assert resp.status_code == 200
+        # Order preserved, duplicates removed.
+        assert resp.json()["allowed_senders"] == ["U1", "U2"]
+
+    def test_patch_strips_whitespace(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": ["  U1  ", "U2"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["allowed_senders"] == ["U1", "U2"]
+
+    def test_patch_empty_string_returns_422(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": ["U1", "  ", "U2"]},
+        )
+        assert resp.status_code == 422
+        # Original allowlist not mutated.
+        body = client.get(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access"
+        ).json()
+        assert body["allowed_senders"] == []
+
+    def test_patch_404_unknown_binding(self, client, bound_agent):
+        agent_id, _ = bound_agent
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/nope/access",
+            json={"allowed_senders": ["U1"]},
+        )
+        assert resp.status_code == 404
+
+    def test_patch_persists_across_get(self, client, bound_agent):
+        agent_id, binding_id = bound_agent
+        client.patch(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access",
+            json={"allowed_senders": ["U1", "U2"]},
+        )
+        body = client.get(
+            f"/v1/managed-agents/{agent_id}/channels/{binding_id}/access"
+        ).json()
+        assert body["allowed_senders"] == ["U1", "U2"]
+        assert body["unrestricted"] is False
+
+
 def test_run_agent_concurrent_returns_409(tmp_path):
     """Rapid Run Now clicks should not spawn multiple ticks."""
     from openjarvis.agents.manager import AgentManager
