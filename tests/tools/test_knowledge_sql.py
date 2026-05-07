@@ -88,3 +88,96 @@ def test_registered() -> None:
 
     ToolRegistry.register_value("knowledge_sql", KnowledgeSQLTool)
     assert ToolRegistry.contains("knowledge_sql")
+
+
+# ---------------------------------------------------------------------------
+# AG-9: hard-deny raw SQL under a restricted per-agent allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_restricted_allowlist_refuses_sql(store: KnowledgeStore) -> None:
+    from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+    from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
+
+    # Reset to discard MEMORY_STORE events emitted by the `store` fixture's
+    # setup, which created the singleton with record_history=False.
+    reset_event_bus()
+    bus = get_event_bus(record_history=True)
+
+    tool = KnowledgeSQLTool(store=store)
+    result = tool.execute(
+        query="SELECT COUNT(*) FROM knowledge_chunks",
+        allowed_data_sources=["gmail"],
+    )
+
+    assert result.success is False
+    assert "not permitted" in result.content.lower()
+    assert (
+        result.metadata["refused_reason"]
+        == "raw_sql_disabled_under_restricted_allowlist"
+    )
+
+    refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
+    assert len(refused) == 1
+    assert refused[0].data["tool"] == "knowledge_sql"
+    assert refused[0].data["allowed_data_sources"] == ["gmail"]
+    assert refused[0].data["reason"] == "raw_sql_disabled_under_restricted_allowlist"
+    assert refused[0].data["source_id"] is None
+
+
+def test_wildcard_allows_sql(store: KnowledgeStore) -> None:
+    from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+    from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
+
+    reset_event_bus()
+    bus = get_event_bus(record_history=True)
+
+    tool = KnowledgeSQLTool(store=store)
+    result = tool.execute(
+        query="SELECT COUNT(*) as total FROM knowledge_chunks",
+        allowed_data_sources=["*"],
+    )
+
+    assert result.success is True
+    assert "4" in result.content
+
+    refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
+    assert refused == []
+
+
+def test_empty_allowlist_refuses_sql(store: KnowledgeStore) -> None:
+    from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+    from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
+
+    reset_event_bus()
+    bus = get_event_bus(record_history=True)
+
+    tool = KnowledgeSQLTool(store=store)
+    result = tool.execute(
+        query="SELECT COUNT(*) FROM knowledge_chunks",
+        allowed_data_sources=[],
+    )
+
+    # Empty list = default-deny (consistent with Phase 5 / Phase 9 / Phase 12).
+    assert result.success is False
+    refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
+    assert len(refused) == 1
+    assert refused[0].data["allowed_data_sources"] == []
+
+
+def test_no_kwarg_unchanged_behavior(store: KnowledgeStore) -> None:
+    from openjarvis.core.events import EventType, get_event_bus, reset_event_bus
+    from openjarvis.tools.knowledge_sql import KnowledgeSQLTool
+
+    reset_event_bus()
+    bus = get_event_bus(record_history=True)
+
+    tool = KnowledgeSQLTool(store=store)
+    # No allowed_data_sources kwarg → legacy path, query runs.
+    result = tool.execute(query="SELECT COUNT(*) as total FROM knowledge_chunks")
+
+    assert result.success is True
+    assert "4" in result.content
+
+    refused = [e for e in bus.history if e.event_type == EventType.DATA_SOURCE_REFUSED]
+    assert refused == []

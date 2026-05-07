@@ -76,6 +76,40 @@ class KnowledgeSQLTool(BaseTool):
                 success=False,
             )
 
+        # AG-9: hard-deny raw SQL when the agent's allowlist is restricted.
+        # Aggregates leak counts/sums even without source columns, and
+        # injecting a WHERE clause into arbitrary user SQL is fragile —
+        # so refuse the entire surface unless the agent has wildcard
+        # access. None = no policy (legacy path); ["*"] = explicit grant.
+        allowed_data_sources_param = params.get("allowed_data_sources")
+        if allowed_data_sources_param is not None and "*" not in (
+            allowed_data_sources_param or []
+        ):
+            from openjarvis.core.events import EventType, get_event_bus
+
+            get_event_bus().publish(
+                EventType.DATA_SOURCE_REFUSED,
+                {
+                    "source_id": None,
+                    "allowed_data_sources": list(allowed_data_sources_param),
+                    "tool": "knowledge_sql",
+                    "reason": "raw_sql_disabled_under_restricted_allowlist",
+                },
+            )
+            return ToolResult(
+                tool_name="knowledge_sql",
+                content=(
+                    "Raw SQL is not permitted under a restricted data-source"
+                    " allowlist. Use knowledge_search or digest_collect with"
+                    " an explicit source instead."
+                ),
+                success=False,
+                metadata={
+                    "num_rows": 0,
+                    "refused_reason": "raw_sql_disabled_under_restricted_allowlist",
+                },
+            )
+
         normalized = query.lstrip().upper()
         if not normalized.startswith("SELECT"):
             return ToolResult(
