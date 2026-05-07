@@ -428,11 +428,38 @@ class DigestCollectTool(BaseTool):
         hours_back: float = params.get("hours_back", 24)
         since = datetime.now() - timedelta(hours=hours_back)
 
+        # AG-9: optional harness-injected per-agent data-source allowlist.
+        # When present, sources not on the allowlist are refused before any
+        # connector lookup or sync. None = no policy applied (legacy behavior).
+        allowed_data_sources_param = params.get("allowed_data_sources")
+
         # Collect raw documents per source
         collected_docs: Dict[str, List[Document]] = {}
         errors: List[str] = []
 
         for source in sources:
+            if allowed_data_sources_param is not None:
+                from openjarvis.agents.access import is_data_source_allowed
+
+                if not is_data_source_allowed(
+                    {"allowed_data_sources": allowed_data_sources_param},
+                    source,
+                ):
+                    # obs-1: emit refusal event for monitoring/frontend hooks.
+                    # Lazy import keeps the happy path's dependency surface unchanged.
+                    from openjarvis.core.events import EventType, get_event_bus
+
+                    get_event_bus().publish(
+                        EventType.DATA_SOURCE_REFUSED,
+                        {
+                            "source_id": source,
+                            "allowed_data_sources": list(allowed_data_sources_param),
+                            "tool": "digest_collect",
+                        },
+                    )
+                    errors.append(f"Source '{source}' not permitted by agent allowlist")
+                    continue
+
             if not ConnectorRegistry.contains(source):
                 errors.append(f"Connector '{source}' not available")
                 continue

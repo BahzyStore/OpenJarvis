@@ -220,6 +220,142 @@ class TestAgentManagerRoutes:
         assert res.status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Per-agent data-source allowlist (AG-9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not HAS_FASTAPI, reason="fastapi not installed")
+class TestAgentAccess:
+    """Phase 5 — GET/PATCH /v1/managed-agents/{id}/access plus the
+    default-deny `allowed_data_sources: []` applied at create."""
+
+    @pytest.fixture
+    def client(self, manager):
+        from fastapi import FastAPI
+
+        from openjarvis.core.registry import ConnectorRegistry
+        from openjarvis.server.agent_manager_routes import create_agent_manager_router
+
+        # The autouse `_clean_registries` fixture in tests/conftest.py wipes
+        # ConnectorRegistry before each test, so pre-populate it with a few
+        # placeholder connectors. This isolates the test from the real
+        # connector inventory while still exercising the registry-validation
+        # path in PATCH /access.
+        for cid in ("test_alpha", "test_beta", "test_gamma"):
+            ConnectorRegistry.register(cid)(object)
+
+        app = FastAPI()
+        for r in create_agent_manager_router(manager):
+            app.include_router(r)
+        return TestClient(app)
+
+    def test_default_allowlist_is_empty_at_create(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        body = client.get(f"/v1/managed-agents/{agent_id}/access").json()
+        assert body["allowed_data_sources"] == []
+        assert body["wildcard"] is False
+
+    def test_get_includes_available_connectors(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        body = client.get(f"/v1/managed-agents/{agent_id}/access").json()
+        assert "available_data_sources" in body
+        assert isinstance(body["available_data_sources"], list)
+        assert len(body["available_data_sources"]) > 0
+        assert all(isinstance(s, str) for s in body["available_data_sources"])
+
+    def test_get_404_for_unknown_agent(self, client):
+        assert client.get("/v1/managed-agents/nope/access").status_code == 404
+
+    def test_patch_grants_known_connectors(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        # Use connector IDs from the registry to avoid hardcoding names
+        # that might be removed/renamed in the future.
+        available = client.get(f"/v1/managed-agents/{agent_id}/access").json()[
+            "available_data_sources"
+        ]
+        assert len(available) >= 2
+        first_two = available[:2]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": first_two},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["allowed_data_sources"] == first_two
+        assert resp.json()["wildcard"] is False
+
+    def test_patch_wildcard_grants_all(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": ["*"]},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["allowed_data_sources"] == ["*"]
+        assert resp.json()["wildcard"] is True
+
+    def test_patch_unknown_connector_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": ["gmial", "not-a-real-connector"]},
+        )
+        assert resp.status_code == 422
+        detail = str(resp.json().get("detail", "")).lower()
+        assert "unknown" in detail or "gmial" in detail
+        # And the agent's allowlist was NOT mutated.
+        body = client.get(f"/v1/managed-agents/{agent_id}/access").json()
+        assert body["allowed_data_sources"] == []
+
+    def test_patch_mixed_known_and_unknown_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        available = client.get(f"/v1/managed-agents/{agent_id}/access").json()[
+            "available_data_sources"
+        ]
+        assert len(available) >= 1
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": [available[0], "definitely-not-real"]},
+        )
+        # All-or-nothing: any unknown rejects the whole patch.
+        assert resp.status_code == 422
+
+    def test_patch_empty_list_resets_to_deny_all(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": ["*"]},
+        )
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": []},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["allowed_data_sources"] == []
+        assert resp.json()["wildcard"] is False
+
+    def test_patch_dedupes_repeated_entries(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "a"}).json()["id"]
+        available = client.get(f"/v1/managed-agents/{agent_id}/access").json()[
+            "available_data_sources"
+        ]
+        first = available[0]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/access",
+            json={"allowed_data_sources": [first, first, "*", "*"]},
+        )
+        assert resp.status_code == 200
+        # Order preserved, duplicates removed.
+        assert resp.json()["allowed_data_sources"] == [first, "*"]
+
+    def test_patch_404_for_unknown_agent(self, client):
+        resp = client.patch(
+            "/v1/managed-agents/nope/access",
+            json={"allowed_data_sources": ["*"]},
+        )
+        assert resp.status_code == 404
+
+
 def test_run_agent_concurrent_returns_409(tmp_path):
     """Rapid Run Now clicks should not spawn multiple ticks."""
     from openjarvis.agents.manager import AgentManager
