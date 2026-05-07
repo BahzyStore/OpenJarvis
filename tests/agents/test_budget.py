@@ -78,3 +78,143 @@ def test_token_budget_exceeded(tmp_path):
     updated = mgr.get_agent(agent["id"])
     assert updated["status"] == "budget_exceeded"
     mgr.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-day rolling cap (AG-5)
+# ---------------------------------------------------------------------------
+
+
+import pytest  # noqa: E402
+
+
+def test_daily_cap_unconfigured_is_unbounded(tmp_path):
+    """No daily caps set => check_daily_budget returns ok."""
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent("a", config={})
+    ok, reason = mgr.check_daily_budget(agent["id"])
+    assert ok is True
+    assert reason is None
+    mgr.close()
+
+
+def test_daily_cap_zero_is_unbounded(tmp_path):
+    """max_cost_per_day=0 means unlimited (matches existing 0=unlimited)."""
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent(
+        "a",
+        config={"max_cost_per_day": 0, "max_tokens_per_day": 0},
+    )
+    ok, _ = mgr.check_daily_budget(agent["id"])
+    assert ok is True
+    mgr.close()
+
+
+def test_daily_token_cap_blocks_when_exceeded(tmp_path):
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent("a", config={"max_tokens_per_day": 100})
+    mgr.update_agent(
+        agent["id"],
+        input_tokens_increment=60,
+        output_tokens_increment=50,
+    )
+    ok, reason = mgr.check_daily_budget(agent["id"])
+    assert ok is False
+    assert "token" in reason.lower()
+    mgr.close()
+
+
+def test_daily_cost_cap_blocks_when_exceeded(tmp_path):
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent("a", config={"max_cost_per_day": 0.10})
+    mgr.update_agent(agent["id"], total_cost_increment=0.15)
+    ok, reason = mgr.check_daily_budget(agent["id"])
+    assert ok is False
+    assert "cost" in reason.lower()
+    mgr.close()
+
+
+def test_daily_cap_under_limit_passes(tmp_path):
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent(
+        "a",
+        config={"max_cost_per_day": 1.0, "max_tokens_per_day": 1000},
+    )
+    mgr.update_agent(
+        agent["id"],
+        total_cost_increment=0.5,
+        input_tokens_increment=200,
+        output_tokens_increment=300,
+    )
+    ok, reason = mgr.check_daily_budget(agent["id"])
+    assert ok is True
+    assert reason is None
+    mgr.close()
+
+
+def test_daily_usage_for_returns_zero_initially(tmp_path):
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent("a")
+    u = mgr.daily_usage_for(agent["id"])
+    assert u["cost"] == 0.0
+    assert u["tokens"] == 0
+    mgr.close()
+
+
+def test_daily_usage_accumulates_across_updates(tmp_path):
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent("a")
+    mgr.update_agent(
+        agent["id"],
+        total_cost_increment=0.10,
+        input_tokens_increment=100,
+        output_tokens_increment=200,
+    )
+    mgr.update_agent(
+        agent["id"],
+        total_cost_increment=0.05,
+        input_tokens_increment=50,
+        output_tokens_increment=50,
+    )
+    u = mgr.daily_usage_for(agent["id"])
+    assert u["cost"] == pytest.approx(0.15)
+    assert u["tokens"] == 400
+    mgr.close()
+
+
+def test_daily_usage_isolates_agents(tmp_path):
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    a1 = mgr.create_agent("a1")
+    a2 = mgr.create_agent("a2")
+    mgr.update_agent(a1["id"], total_cost_increment=0.1, input_tokens_increment=100)
+    mgr.update_agent(a2["id"], total_cost_increment=0.2, input_tokens_increment=200)
+    assert mgr.daily_usage_for(a1["id"])["tokens"] == 100
+    assert mgr.daily_usage_for(a2["id"])["tokens"] == 200
+    assert mgr.daily_usage_for(a1["id"])["cost"] == pytest.approx(0.1)
+    assert mgr.daily_usage_for(a2["id"])["cost"] == pytest.approx(0.2)
+    mgr.close()
+
+
+def test_daily_usage_rolls_over_at_day_change(tmp_path):
+    """A stale day entry triggers rollover on next read."""
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    agent = mgr.create_agent("a")
+    # Inject a stale entry for an obviously-past day.
+    mgr._daily_usage[agent["id"]] = {
+        "day": "1999-01-01",
+        "cost": 99.99,
+        "tokens": 99999,
+    }
+    u = mgr.daily_usage_for(agent["id"])
+    assert u["cost"] == 0.0
+    assert u["tokens"] == 0
+    mgr.close()
+
+
+def test_check_daily_budget_unknown_agent_returns_ok(tmp_path):
+    """Unknown agents are not gated — caller checks existence separately."""
+    mgr = AgentManager(str(tmp_path / "test.db"))
+    ok, reason = mgr.check_daily_budget("nonexistent")
+    assert ok is True
+    assert reason is None
+    mgr.close()

@@ -6,12 +6,14 @@ to the five existing primitives (Intelligence, Agent, Tools, Engine, Learning).
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 _CREATE_AGENTS = """\
@@ -124,6 +126,14 @@ class AgentManager:
                 pass  # Column already exists
         self._conn.commit()
 
+        # Daily-rolling cost / token cache (AG-5). In-memory; resets on
+        # restart and at calendar-day boundary. Enforced via
+        # :meth:`check_daily_budget` against agent config keys
+        # ``max_cost_per_day`` and ``max_tokens_per_day``.
+        self._daily_lock = threading.Lock()
+        # agent_id -> {"day": "YYYY-MM-DD", "cost": float, "tokens": int}
+        self._daily_usage: Dict[str, Dict[str, Any]] = {}
+
     def close(self) -> None:
         self._conn.close()
 
@@ -207,7 +217,107 @@ class AgentManager:
             f"UPDATE managed_agents SET {', '.join(sets)} WHERE id = ?", vals
         )
         self._conn.commit()
+        # Mirror cost/token increments into the daily cache (AG-5).
+        if (
+            total_cost_increment
+            or input_tokens_increment
+            or output_tokens_increment
+            or total_tokens_increment
+        ):
+            tokens_for_daily = total_tokens_increment or (
+                input_tokens_increment + output_tokens_increment
+            )
+            self._record_daily_usage(
+                agent_id,
+                cost_delta=float(total_cost_increment or 0),
+                tokens_delta=int(tokens_for_daily or 0),
+            )
         return self.get_agent(agent_id)  # type: ignore[return-value]
+
+    # ── Daily cost / token caps (AG-5) ────────────────────────────
+
+    @staticmethod
+    def _today_iso() -> str:
+        return _dt.date.today().isoformat()
+
+    def _record_daily_usage(
+        self,
+        agent_id: str,
+        *,
+        cost_delta: float = 0.0,
+        tokens_delta: int = 0,
+    ) -> None:
+        """Increment the agent's in-memory daily-usage counters,
+        rolling over at calendar-day boundary."""
+        if not (cost_delta or tokens_delta):
+            return
+        today = self._today_iso()
+        with self._daily_lock:
+            entry = self._daily_usage.get(agent_id)
+            if entry is None or entry.get("day") != today:
+                entry = {"day": today, "cost": 0.0, "tokens": 0}
+                self._daily_usage[agent_id] = entry
+            entry["cost"] += float(cost_delta)
+            entry["tokens"] += int(tokens_delta)
+
+    def daily_usage_for(self, agent_id: str) -> Dict[str, Any]:
+        """Return the agent's recorded cost/token totals for today.
+
+        Rolls over (resets to zero) on calendar-day change so callers
+        never see stale data from a previous day.
+        """
+        today = self._today_iso()
+        with self._daily_lock:
+            entry = self._daily_usage.get(agent_id)
+            if entry is None or entry.get("day") != today:
+                self._daily_usage[agent_id] = {
+                    "day": today,
+                    "cost": 0.0,
+                    "tokens": 0,
+                }
+            entry = self._daily_usage[agent_id]
+            return {
+                "day": entry["day"],
+                "cost": entry["cost"],
+                "tokens": entry["tokens"],
+            }
+
+    def check_daily_budget(self, agent_id: str) -> Tuple[bool, Optional[str]]:
+        """Return ``(ok, reason)`` for whether *agent_id* has budget left
+        today.
+
+        ``ok=True`` and ``reason=None`` when:
+
+        * the agent does not exist, or
+        * neither ``max_cost_per_day`` nor ``max_tokens_per_day`` is set
+          (matching the existing convention that ``0`` / unset means
+          unlimited), or
+        * current daily usage is strictly below both configured caps.
+
+        ``ok=False`` and a human-readable ``reason`` when one cap is met
+        or exceeded. The agent's ``status`` is NOT modified — that
+        remains the lifetime-cap path's concern (see
+        :class:`openjarvis.agents.executor.AgentExecutor`).
+        """
+        agent = self.get_agent(agent_id)
+        if not agent:
+            return True, None
+        config = agent.get("config") or {}
+        max_cost_per_day = config.get("max_cost_per_day", 0) or 0
+        max_tokens_per_day = config.get("max_tokens_per_day", 0) or 0
+        if not max_cost_per_day and not max_tokens_per_day:
+            return True, None
+        usage = self.daily_usage_for(agent_id)
+        if max_cost_per_day and usage["cost"] >= max_cost_per_day:
+            return False, (
+                f"daily cost cap exceeded: ${usage['cost']:.4f} / "
+                f"${max_cost_per_day:.4f}"
+            )
+        if max_tokens_per_day and usage["tokens"] >= max_tokens_per_day:
+            return False, (
+                f"daily token cap exceeded: {usage['tokens']} / {max_tokens_per_day}"
+            )
+        return True, None
 
     def delete_agent(self, agent_id: str) -> None:
         self._set_status(agent_id, "archived")

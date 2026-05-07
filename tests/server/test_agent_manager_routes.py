@@ -38,11 +38,10 @@ class TestAgentManagerRoutes:
 
         app = FastAPI()
         routers = create_agent_manager_router(manager)
-        agents_router, templates_router, global_router, tools_router = routers
-        app.include_router(agents_router)
-        app.include_router(templates_router)
-        app.include_router(global_router)
-        app.include_router(tools_router)
+        # create_agent_manager_router returns 5 routers since sendblue was
+        # added; the fixture unpacks all of them defensively.
+        for r in routers:
+            app.include_router(r)
         return TestClient(app)
 
     def test_list_agents_empty(self, client):
@@ -223,6 +222,105 @@ class TestAgentManagerRoutes:
         )
         assert res.status_code == 404
 
+    # ── Per-agent budget caps (AG-5) ──────────────────────────
+
+    def test_budget_default_caps_applied_on_create(self, client):
+        resp = client.post("/v1/managed-agents", json={"name": "default-budget"})
+        assert resp.status_code == 200
+        agent_id = resp.json()["id"]
+        body = client.get(f"/v1/managed-agents/{agent_id}/budget").json()
+        assert body["max_cost_per_day"] == 1.0
+        assert body["max_tokens_per_day"] == 10_000
+
+    def test_budget_get_includes_usage(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "u"}).json()["id"]
+        body = client.get(f"/v1/managed-agents/{agent_id}/budget").json()
+        assert "daily_usage" in body
+        assert body["daily_usage"]["cost"] == 0
+        assert body["daily_usage"]["tokens"] == 0
+        assert "lifetime_usage" in body
+
+    def test_budget_get_404_for_unknown(self, client):
+        assert client.get("/v1/managed-agents/nope/budget").status_code == 404
+
+    def test_budget_patch_updates_a_cap(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "p"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/budget",
+            json={"max_tokens_per_day": 5000},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["max_tokens_per_day"] == 5000
+        # Cost cap unchanged from default
+        assert body["max_cost_per_day"] == 1.0
+
+    def test_budget_patch_lifetime_cap_no_confirm_needed(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "lt"}).json()["id"]
+        # max_cost / max_tokens default to 0 already, so setting them
+        # to 0 isn't a "disabling" transition.
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/budget",
+            json={"max_cost": 5.0, "max_tokens": 50_000},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["max_cost"] == 5.0
+        assert resp.json()["max_tokens"] == 50_000
+
+    def test_budget_patch_disable_daily_without_confirm_returns_422(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "d"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/budget",
+            json={"max_cost_per_day": 0},
+        )
+        assert resp.status_code == 422
+        # Confirm cap not changed
+        assert (
+            client.get(f"/v1/managed-agents/{agent_id}/budget").json()[
+                "max_cost_per_day"
+            ]
+            == 1.0
+        )
+
+    def test_budget_patch_disable_daily_with_confirm_succeeds(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "d2"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/budget",
+            json={"max_cost_per_day": 0, "confirm_disable": True},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["max_cost_per_day"] == 0
+
+    def test_budget_patch_set_null_treated_as_disable(self, client):
+        agent_id = client.post("/v1/managed-agents", json={"name": "n"}).json()["id"]
+        resp = client.patch(
+            f"/v1/managed-agents/{agent_id}/budget",
+            json={"max_tokens_per_day": None},
+        )
+        assert resp.status_code == 422
+
+    def test_budget_patch_404_for_unknown(self, client):
+        resp = client.patch(
+            "/v1/managed-agents/nope/budget",
+            json={"max_tokens_per_day": 100},
+        )
+        assert resp.status_code == 404
+
+    def test_run_blocked_when_daily_token_cap_exceeded(self, manager, client):
+        agent_id = client.post(
+            "/v1/managed-agents",
+            json={"name": "tiny", "config": {"max_tokens_per_day": 10}},
+        ).json()["id"]
+        # Push usage over the cap directly via the manager.
+        manager.update_agent(
+            agent_id,
+            input_tokens_increment=60,
+            output_tokens_increment=50,
+        )
+        resp = client.post(f"/v1/managed-agents/{agent_id}/run")
+        assert resp.status_code == 429
+        assert "token" in resp.json()["detail"].lower()
+
 
 def test_run_agent_concurrent_returns_409(tmp_path):
     """Rapid Run Now clicks should not spawn multiple ticks."""
@@ -287,11 +385,10 @@ class TestAgentManagerStreaming:
         app.state.bus = None
 
         routers = create_agent_manager_router(manager)
-        agents_router, templates_router, global_router, tools_router = routers
-        app.include_router(agents_router)
-        app.include_router(templates_router)
-        app.include_router(global_router)
-        app.include_router(tools_router)
+        # create_agent_manager_router returns 5 routers since sendblue was
+        # added; the fixture unpacks all of them defensively.
+        for r in routers:
+            app.include_router(r)
         return TestClient(app)
 
     def test_send_message_stream(self, manager, stream_client):

@@ -59,6 +59,45 @@ class FeedbackRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class BudgetPatchRequest(BaseModel):
+    """Patch the budget caps on an agent (AG-5).
+
+    Daily caps default to non-zero values when an agent is created.
+    Setting either daily field to ``0`` (or ``null``) removes that cap;
+    because that leaves the agent unbounded for that dimension, the
+    request must include ``confirm_disable=true`` to perform the
+    transition. Lifetime caps (``max_cost`` / ``max_tokens``) default
+    to ``0`` already, so no confirmation is required to set them.
+    """
+
+    max_cost_per_day: Optional[float] = None
+    max_tokens_per_day: Optional[int] = None
+    max_cost: Optional[float] = None
+    max_tokens: Optional[int] = None
+    confirm_disable: bool = False
+
+
+# AG-5: defaults applied to newly-created agents that don't override.
+_DEFAULT_MAX_COST_PER_DAY: float = 1.0
+_DEFAULT_MAX_TOKENS_PER_DAY: int = 10_000
+
+
+def _budget_view(manager: AgentManager, agent: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the response shape used by GET/PATCH ``/budget``."""
+    config = agent.get("config") or {}
+    return {
+        "max_cost_per_day": config.get("max_cost_per_day", 0) or 0,
+        "max_tokens_per_day": config.get("max_tokens_per_day", 0) or 0,
+        "max_cost": config.get("max_cost", 0) or 0,
+        "max_tokens": config.get("max_tokens", 0) or 0,
+        "daily_usage": manager.daily_usage_for(agent["id"]),
+        "lifetime_usage": {
+            "total_cost": agent.get("total_cost", 0) or 0,
+            "total_tokens": agent.get("total_tokens", 0) or 0,
+        },
+    }
+
+
 _BROWSER_SUB_TOOLS = {
     "browser_navigate",
     "browser_click",
@@ -1319,13 +1358,18 @@ def create_agent_manager_router(
 
     @agents_router.post("")
     async def create_agent(req: CreateAgentRequest, request: Request):
+        # AG-5: apply default daily caps unless the caller explicitly set them.
+        config = dict(req.config or {})
+        config.setdefault("max_cost_per_day", _DEFAULT_MAX_COST_PER_DAY)
+        config.setdefault("max_tokens_per_day", _DEFAULT_MAX_TOKENS_PER_DAY)
+
         if req.template_id:
             agent = manager.create_from_template(
-                req.template_id, req.name, overrides=req.config
+                req.template_id, req.name, overrides=config
             )
         else:
             agent = manager.create_agent(
-                name=req.name, agent_type=req.agent_type, config=req.config
+                name=req.name, agent_type=req.agent_type, config=config
             )
 
         # Register with scheduler if cron/interval
@@ -1387,6 +1431,13 @@ def create_agent_manager_router(
         if agent["status"] == "archived":
             raise HTTPException(status_code=400, detail="Agent is archived")
 
+        # AG-5: refuse to start a tick when the agent has met or exceeded
+        # its daily token / cost cap. (Lifetime caps remain enforced via
+        # the post-tick path in AgentExecutor.)
+        ok, reason = manager.check_daily_budget(agent_id)
+        if not ok:
+            raise HTTPException(status_code=429, detail=reason)
+
         # Auto-recover from error/needs_attention state
         if agent["status"] in ("error", "needs_attention"):
             manager.update_agent(agent_id, status="idle")
@@ -1440,6 +1491,59 @@ def create_agent_manager_router(
 
         threading.Thread(target=_run_tick, daemon=True).start()
         return {"status": "running", "agent_id": agent_id}
+
+    # ── Budget (AG-5) ────────────────────────────────────────
+
+    @agents_router.get("/{agent_id}/budget")
+    async def get_agent_budget(agent_id: str):
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        return _budget_view(manager, agent)
+
+    @agents_router.patch("/{agent_id}/budget")
+    async def patch_agent_budget(agent_id: str, req: BudgetPatchRequest):
+        agent = manager.get_agent(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        fields_set = req.model_fields_set
+
+        # Setting either daily field to 0 or null leaves the agent
+        # unbounded for that dimension; require confirm_disable=true.
+        is_disabling = False
+        if "max_cost_per_day" in fields_set:
+            v = req.max_cost_per_day
+            if v is None or v == 0:
+                is_disabling = True
+        if "max_tokens_per_day" in fields_set:
+            v = req.max_tokens_per_day
+            if v is None or v == 0:
+                is_disabling = True
+        if is_disabling and not req.confirm_disable:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Disabling a daily budget cap requires "
+                    "confirm_disable=true. Setting max_cost_per_day or "
+                    "max_tokens_per_day to 0 or null leaves the agent "
+                    "unbounded for that dimension."
+                ),
+            )
+
+        new_config = dict(agent.get("config") or {})
+        for field_name in (
+            "max_cost_per_day",
+            "max_tokens_per_day",
+            "max_cost",
+            "max_tokens",
+        ):
+            if field_name in fields_set:
+                new_config[field_name] = getattr(req, field_name)
+        manager.update_agent(agent_id, config=new_config)
+
+        refreshed = manager.get_agent(agent_id)
+        return _budget_view(manager, refreshed)
 
     # ── Recover ──────────────────────────────────────────────
 
