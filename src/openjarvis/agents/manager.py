@@ -412,6 +412,41 @@ class AgentManager:
         ).fetchall()
         return [self._row_to_binding(r) for r in rows]
 
+    def update_channel_binding(
+        self,
+        binding_id: str,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        routing_mode: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update mutable fields on a channel binding (MC-4).
+
+        Only fields whose kwargs are non-``None`` are updated. Returns
+        the refreshed binding dict, or ``None`` if no binding exists for
+        *binding_id*.
+        """
+        sets: List[str] = []
+        vals: List[Any] = []
+        if config is not None:
+            sets.append("config_json = ?")
+            vals.append(json.dumps(config))
+        if routing_mode is not None:
+            sets.append("routing_mode = ?")
+            vals.append(routing_mode)
+        if session_id is not None:
+            sets.append("session_id = ?")
+            vals.append(session_id)
+        if not sets:
+            return self._get_binding(binding_id)
+        vals.append(binding_id)
+        self._conn.execute(
+            f"UPDATE channel_bindings SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+        self._conn.commit()
+        return self._get_binding(binding_id)
+
     def unbind_channel(self, binding_id: str) -> None:
         self._conn.execute("DELETE FROM channel_bindings WHERE id = ?", (binding_id,))
         self._conn.commit()
