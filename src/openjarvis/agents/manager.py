@@ -451,6 +451,44 @@ class AgentManager:
         self._conn.execute("DELETE FROM channel_bindings WHERE id = ?", (binding_id,))
         self._conn.commit()
 
+    def get_refusing_bindings_for_channel(
+        self,
+        channel_type: str,
+        sender_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Return the bindings of *channel_type* whose allowlist actively
+        refused *sender_id*.
+
+        Used to enrich the ``CHANNEL_MESSAGE_REFUSED`` event payload (MC-4
+        binding context) so the inspector can show *which* policy
+        rejected the sender.
+
+        A binding "refuses" the sender when its ``allowed_senders`` is
+        non-empty AND does not contain the sender. Bindings with empty
+        allowlists (unrestricted) accept everything and are not included.
+        Each entry has ``binding_id``, ``agent_id``, and ``channel_type``.
+        Returns an empty list when no bindings exist for *channel_type*.
+        """
+        from openjarvis.channels.sender_filter import allowed_senders
+
+        rows = self._conn.execute(
+            "SELECT * FROM channel_bindings WHERE channel_type = ?",
+            (channel_type,),
+        ).fetchall()
+        refused: List[Dict[str, Any]] = []
+        for row in rows:
+            binding = self._row_to_binding(row)
+            senders = allowed_senders(binding.get("config") or {})
+            if senders and sender_id not in senders:
+                refused.append(
+                    {
+                        "binding_id": binding.get("id"),
+                        "agent_id": binding.get("agent_id"),
+                        "channel_type": binding.get("channel_type"),
+                    }
+                )
+        return refused
+
     def is_sender_allowed_for_channel(
         self,
         channel_type: str,
