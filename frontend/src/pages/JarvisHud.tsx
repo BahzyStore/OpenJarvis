@@ -42,6 +42,17 @@ interface CalendarEvent {
   start: string;
 }
 
+interface WeatherData {
+  location: string;
+  temp: number;
+  temp_unit: 'C' | 'F';
+  description: string;
+  humidity: number;
+  wind_speed: number;
+  icon: string;
+  cached?: boolean;
+}
+
 interface NoteEntry {
   title: string;
 }
@@ -143,6 +154,48 @@ function useConnectors(): { connectors: ConnectorInfo[]; loaded: boolean } {
   return { connectors, loaded };
 }
 
+function useWeather(): { weather: WeatherData | null; loaded: boolean; error: string | null } {
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const base = getBase();
+        const resp = await fetch(`${base}/v1/weather/current`);
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({ detail: resp.statusText }));
+          if (!cancelled) {
+            setError(body.detail || `HTTP ${resp.status}`);
+            setLoaded(true);
+          }
+          return;
+        }
+        const data = (await resp.json()) as WeatherData;
+        if (!cancelled) {
+          setWeather(data);
+          setError(null);
+          setLoaded(true);
+        }
+      } catch (exc) {
+        if (!cancelled) {
+          setError(exc instanceof Error ? exc.message : String(exc));
+          setLoaded(true);
+        }
+      }
+    };
+    refresh();
+    // Refresh every 10 minutes — matches the backend's cache TTL
+    const id = setInterval(refresh, 600_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+  return { weather, loaded, error };
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -153,6 +206,7 @@ export function JarvisHud() {
   const { stats, offline: statsOffline } = useTelemetry();
   const { agents, loaded: agentsLoaded } = useAgentsList();
   const { connectors, loaded: connectorsLoaded } = useConnectors();
+  const { weather, loaded: weatherLoaded, error: weatherError } = useWeather();
   const selectedModel = useAppStore((s) => s.selectedModel);
   const serverInfo = useAppStore((s) => s.serverInfo);
 
@@ -424,9 +478,30 @@ export function JarvisHud() {
 
       {/* Mid-left: weather */}
       <HudPanel label="WEATHER" className="jarvis-pos-mid-left">
-        <div className="jarvis-mono jarvis-text-lg">{WEATHER_CITY}</div>
-        <div className="jarvis-mono jarvis-text-md jarvis-accent">36°C</div>
-        <div className="jarvis-mono jarvis-text-xs jarvis-dim">CLEAR · HUMIDITY 48%</div>
+        {!weatherLoaded ? (
+          <div className="jarvis-mono jarvis-text-xs jarvis-dim">SYNCING…</div>
+        ) : weather ? (
+          <>
+            <div className="jarvis-mono jarvis-text-lg">
+              {weather.location.split(',')[0].toUpperCase()}
+            </div>
+            <div className="jarvis-mono jarvis-text-md jarvis-accent">
+              {Math.round(weather.temp)}°{weather.temp_unit}
+            </div>
+            <div className="jarvis-mono jarvis-text-xs jarvis-dim">
+              {weather.description.toUpperCase()} · HUMIDITY {weather.humidity}%
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="jarvis-mono jarvis-text-lg">{WEATHER_CITY}</div>
+            <div className="jarvis-mono jarvis-text-xs jarvis-dim">
+              {weatherError && weatherError.includes('not configured')
+                ? 'API KEY NOT SET'
+                : 'WEATHER OFFLINE'}
+            </div>
+          </>
+        )}
       </HudPanel>
 
       {/* Mid-right: calendar */}
