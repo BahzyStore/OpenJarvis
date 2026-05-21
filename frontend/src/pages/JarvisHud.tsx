@@ -25,7 +25,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const HUD_VERSION = 'v0.10.0';
-const WEATHER_CITY = 'MUMBAI';
+const WEATHER_CITY = 'DUBAI';
 
 interface TelemetryStats {
   cpu_percent?: number;
@@ -425,8 +425,8 @@ export function JarvisHud() {
       {/* Mid-left: weather */}
       <HudPanel label="WEATHER" className="jarvis-pos-mid-left">
         <div className="jarvis-mono jarvis-text-lg">{WEATHER_CITY}</div>
-        <div className="jarvis-mono jarvis-text-md jarvis-accent">29°C</div>
-        <div className="jarvis-mono jarvis-text-xs jarvis-dim">CLEAR · HUMIDITY 62%</div>
+        <div className="jarvis-mono jarvis-text-md jarvis-accent">36°C</div>
+        <div className="jarvis-mono jarvis-text-xs jarvis-dim">CLEAR · HUMIDITY 48%</div>
       </HudPanel>
 
       {/* Mid-right: calendar */}
