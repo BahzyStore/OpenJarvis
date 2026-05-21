@@ -672,6 +672,313 @@
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
 }
+/* ===========================================================================
+   JARVIS HUD — Iron-Man cockpit view (full-screen, /jarvis route)
+   =========================================================================== */
+
+@keyframes jarvis-panel-breathe {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.008); }
+}
+
+@keyframes jarvis-circle-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 0 rgba(34, 227, 255, 0.45),
+      0 0 24px 4px rgba(34, 227, 255, 0.18) inset;
+  }
+  50% {
+    box-shadow:
+      0 0 0 18px rgba(34, 227, 255, 0),
+      0 0 36px 6px rgba(34, 227, 255, 0.28) inset;
+  }
+}
+
+@keyframes jarvis-circle-spin {
+  to { transform: rotate(360deg); }
+}
+
+.jarvis-hud-root {
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, #00111d 0%, #000814 60%, #000308 100%);
+  color: #d8f5ff;
+  font-family: 'JetBrains Mono', 'IBM Plex Mono', 'SF Mono', ui-monospace, monospace;
+  overflow: hidden;
+  --jarvis-cyan: #22e3ff;
+  --jarvis-cyan-dim: rgba(34, 227, 255, 0.55);
+  --jarvis-cyan-faint: rgba(34, 227, 255, 0.18);
+  --jarvis-text: #d8f5ff;
+  --jarvis-dim: rgba(216, 245, 255, 0.55);
+  --jarvis-dim-2: rgba(216, 245, 255, 0.35);
+  z-index: 40;
+}
+
+.jarvis-hud-root::before {
+  /* faint grid backdrop */
+  content: '';
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(rgba(34, 227, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 227, 255, 0.06) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+  pointer-events: none;
+}
+
+.jarvis-hud-back {
+  position: absolute;
+  top: 18px;
+  left: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: transparent;
+  border: 1px solid var(--jarvis-cyan-faint);
+  color: var(--jarvis-cyan);
+  font-size: 0.65rem;
+  letter-spacing: 0.18em;
+  cursor: pointer;
+  border-radius: 4px;
+  z-index: 5;
+  font-family: inherit;
+}
+
+.jarvis-hud-back:hover {
+  background: rgba(34, 227, 255, 0.08);
+}
+
+.jarvis-hud-panel {
+  position: absolute;
+  background: linear-gradient(180deg, rgba(0, 24, 40, 0.62), rgba(0, 12, 22, 0.62));
+  border: 1px solid var(--jarvis-cyan-faint);
+  border-radius: 6px;
+  padding: 12px 14px;
+  min-width: 200px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow:
+    0 0 0 1px rgba(34, 227, 255, 0.04),
+    0 0 28px -8px rgba(34, 227, 255, 0.18);
+  animation: jarvis-panel-breathe 4s ease-in-out infinite;
+  transform-origin: center;
+}
+
+.jarvis-hud-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--jarvis-cyan-faint);
+  margin-bottom: 8px;
+}
+
+.jarvis-hud-label {
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--jarvis-cyan);
+  font-weight: 500;
+}
+
+.jarvis-hud-live {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--jarvis-cyan);
+  box-shadow: 0 0 8px var(--jarvis-cyan);
+  animation: jarvis-panel-breathe 1.6s ease-in-out infinite;
+  margin-left: auto;
+}
+
+.jarvis-hud-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Panel positions */
+.jarvis-pos-top-left   { top: 72px; left: 24px; width: 240px; }
+.jarvis-pos-top-right  { top: 24px; right: 24px; width: 240px; }
+.jarvis-pos-mid-left   { top: 50%; left: 24px; width: 240px; transform: translateY(-50%); animation-delay: -0.6s; }
+.jarvis-pos-mid-right  { top: 50%; right: 24px; width: 240px; transform: translateY(-50%); animation-delay: -1.2s; }
+.jarvis-pos-bot-left   { bottom: 24px; left: 24px; width: 280px; animation-delay: -1.8s; }
+.jarvis-pos-bot-right  { bottom: 24px; right: 24px; width: 280px; animation-delay: -2.4s; }
+
+/* mid panels override the breathe transform with translateY */
+.jarvis-pos-mid-left,
+.jarvis-pos-mid-right {
+  animation: none; /* breathe scale conflicts with translateY; keep static glow */
+}
+
+.jarvis-pos-clock {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+}
+
+.jarvis-clock-time {
+  font-size: 3rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  color: var(--jarvis-cyan);
+  text-shadow: 0 0 18px rgba(34, 227, 255, 0.45);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.jarvis-clock-date {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  letter-spacing: 0.36em;
+  color: var(--jarvis-dim);
+}
+
+.jarvis-pos-voice {
+  position: absolute;
+  bottom: 36px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+/* Voice circle */
+.jarvis-voice-circle {
+  position: relative;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, rgba(34, 227, 255, 0.22) 0%, rgba(34, 227, 255, 0.04) 60%, transparent 70%);
+  border: 1px solid var(--jarvis-cyan-dim);
+  color: var(--jarvis-cyan);
+  cursor: pointer;
+  outline: none;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: jarvis-circle-pulse 2.4s ease-in-out infinite;
+  transition: transform 200ms ease, border-color 200ms ease;
+}
+
+.jarvis-voice-circle:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  animation: none;
+}
+
+.jarvis-voice-circle.is-listening {
+  transform: scale(1.08);
+  border-color: var(--jarvis-cyan);
+  animation: jarvis-circle-pulse 0.9s ease-in-out infinite;
+}
+
+.jarvis-voice-circle.is-busy {
+  border-color: var(--jarvis-cyan);
+}
+
+.jarvis-voice-circle-ring {
+  position: absolute;
+  inset: -6px;
+  border: 1px dashed var(--jarvis-cyan-faint);
+  border-radius: 50%;
+  animation: jarvis-circle-spin 14s linear infinite;
+  pointer-events: none;
+}
+
+.jarvis-voice-circle-ring-2 {
+  inset: -18px;
+  border-style: solid;
+  border-color: var(--jarvis-cyan-faint);
+  animation: jarvis-circle-spin 22s linear infinite reverse;
+}
+
+.jarvis-voice-circle-core {
+  position: absolute;
+  inset: 22%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(34, 227, 255, 0.4), rgba(34, 227, 255, 0.05) 70%);
+  pointer-events: none;
+}
+
+.jarvis-voice-circle-icon {
+  position: relative;
+  z-index: 1;
+  color: var(--jarvis-cyan);
+  filter: drop-shadow(0 0 6px rgba(34, 227, 255, 0.6));
+}
+
+.jarvis-voice-circle-label {
+  margin-top: 14px;
+  font-size: 0.7rem;
+  letter-spacing: 0.36em;
+  color: var(--jarvis-cyan);
+  text-shadow: 0 0 8px rgba(34, 227, 255, 0.4);
+}
+
+/* Overlay (you / jarvis text) */
+.jarvis-overlay {
+  position: absolute;
+  bottom: 240px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(720px, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 18px;
+  background: rgba(0, 12, 22, 0.7);
+  border: 1px solid var(--jarvis-cyan-faint);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+/* Utility classes used inside the HUD */
+.jarvis-mono { font-family: inherit; }
+.jarvis-text-xs { font-size: 0.7rem; letter-spacing: 0.08em; }
+.jarvis-text-sm { font-size: 0.82rem; letter-spacing: 0.04em; }
+.jarvis-text-md { font-size: 1.1rem; letter-spacing: 0.06em; }
+.jarvis-text-lg { font-size: 1.35rem; letter-spacing: 0.08em; }
+.jarvis-dim { color: var(--jarvis-dim); }
+.jarvis-accent { color: var(--jarvis-cyan); }
+.jarvis-trunc {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.jarvis-wordmark {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: 0.36em;
+  color: var(--jarvis-cyan);
+  text-shadow: 0 0 18px rgba(34, 227, 255, 0.45);
+  line-height: 1;
+  margin: 4px 0 6px;
+}
+
+.jarvis-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-hud-panel,
+  .jarvis-voice-circle,
+  .jarvis-voice-circle-ring,
+  .jarvis-hud-live {
+    animation: none !important;
+  }
+}
+
 @theme inline {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   /* shadcn component tokens — namespaced to avoid collision with OpenJarvis design tokens */
