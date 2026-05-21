@@ -3,12 +3,103 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 # Module-level cache of connector instances (keyed by connector_id).
 _instances: Dict[str, Any] = {}
+
+# Set after _restore_connectors() runs once; protects against repeat work
+# when the router factory is invoked multiple times in tests.
+_restored: bool = False
+
+
+def _apply_saved_config(connector_id: str, instance: Any) -> None:
+    """Apply a previously-saved persistence config to *instance* in place.
+
+    Quietly no-ops when no config exists or the values aren't applicable
+    to the connector — persistence is best-effort.
+    """
+    try:
+        from openjarvis.connectors.persistence import load_connector_config
+    except Exception:
+        return
+
+    cfg = load_connector_config(connector_id)
+    if not cfg:
+        return
+
+    # Filesystem connectors (currently only "obsidian") store a vault_path.
+    auth_type = getattr(instance, "auth_type", "")
+    if auth_type == "filesystem":
+        vault_path = cfg.get("vault_path") or cfg.get("path")
+        if vault_path:
+            instance._vault_path = vault_path
+            try:
+                instance._connected = Path(vault_path).is_dir()
+            except Exception:
+                instance._connected = False
+        return
+
+    # Generic: copy any attribute the instance already exposes.
+    for key, value in cfg.items():
+        attr = f"_{key}" if not key.startswith("_") else key
+        if hasattr(instance, attr):
+            try:
+                setattr(instance, attr, value)
+            except Exception:  # noqa: PERF203 — best-effort restore
+                pass
+
+
+def _restore_connectors() -> None:
+    """Seed default vault + warm connector instances from persisted configs.
+
+    Runs once per process.  Failures are logged and swallowed — the
+    backend must still come up even if persistence is unhealthy.
+    """
+    global _restored
+    if _restored:
+        return
+    _restored = True
+
+    try:
+        from openjarvis.connectors.persistence import (
+            ensure_default_vault,
+            load_all_connector_configs,
+        )
+        from openjarvis.core.registry import ConnectorRegistry
+    except Exception as exc:
+        logger.warning("Connector restore unavailable: %s", exc)
+        return
+
+    # Deliverable 3: seed a default AtomicX vault on first run.
+    try:
+        ensure_default_vault()
+    except Exception as exc:
+        logger.warning("ensure_default_vault failed: %s", exc)
+
+    configs = load_all_connector_configs()
+    for connector_id, _cfg in configs.items():
+        if not ConnectorRegistry.contains(connector_id):
+            continue
+        try:
+            cls = ConnectorRegistry.get(connector_id)
+            instance = cls()
+            _apply_saved_config(connector_id, instance)
+            _instances[connector_id] = instance
+            logger.info(
+                "Restored connector %s (connected=%s)",
+                connector_id,
+                instance.is_connected(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to restore connector %s: %s",
+                connector_id,
+                exc,
+            )
 
 
 def _ensure_connectors_registered() -> None:
@@ -89,6 +180,12 @@ def create_connectors_router():
 
     from openjarvis.core.registry import ConnectorRegistry
 
+    # Ensure built-in connectors are imported before we restore persisted
+    # configs — otherwise ConnectorRegistry.contains(...) will return False
+    # for connectors whose modules haven't yet been loaded.
+    _ensure_connectors_registered()
+    _restore_connectors()
+
     router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
     # ------------------------------------------------------------------
@@ -96,10 +193,16 @@ def create_connectors_router():
     # ------------------------------------------------------------------
 
     def _get_or_create(connector_id: str) -> Any:
-        """Return a cached connector instance, creating it if needed."""
+        """Return a cached connector instance, creating it if needed.
+
+        Newly created instances are seeded with any persisted config so
+        a fresh process picks up the last-known connection state.
+        """
         if connector_id not in _instances:
             cls = ConnectorRegistry.get(connector_id)
-            _instances[connector_id] = cls()
+            instance = cls()
+            _apply_saved_config(connector_id, instance)
+            _instances[connector_id] = instance
         return _instances[connector_id]
 
     def _connector_summary(connector_id: str, instance: Any) -> Dict[str, Any]:
@@ -223,8 +326,6 @@ def create_connectors_router():
                 # Filesystem connectors accept a vault / directory path.
                 if req.path:
                     instance._vault_path = req.path
-                    from pathlib import Path
-
                     instance._connected = Path(req.path).is_dir()
 
             elif auth_type == "oauth":
@@ -247,6 +348,24 @@ def create_connectors_router():
 
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+
+        # Persist non-secret config so the connection survives restarts.
+        # Secrets (OAuth tokens, passwords) are handled separately by
+        # oauth.py / secrets_store, not by this JSON layer.
+        if instance.is_connected():
+            try:
+                from openjarvis.connectors.persistence import (
+                    save_connector_config,
+                )
+
+                if auth_type == "filesystem" and req.path:
+                    save_connector_config(connector_id, {"vault_path": req.path})
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist config for %s: %s",
+                    connector_id,
+                    exc,
+                )
 
         # Auto-ingest after successful connection
         if instance.is_connected():
@@ -297,6 +416,21 @@ def create_connectors_router():
             instance.disconnect()
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
+
+        # Drop the persisted config so a future restart starts clean.
+        try:
+            from openjarvis.connectors.persistence import (
+                clear_connector_config,
+            )
+
+            clear_connector_config(connector_id)
+        except Exception as exc:
+            logger.warning(
+                "Could not clear persisted config for %s: %s",
+                connector_id,
+                exc,
+            )
+
         return {
             "connector_id": connector_id,
             "connected": False,

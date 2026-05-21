@@ -8,9 +8,10 @@ can be ingested by the knowledge pipeline.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from urllib.parse import quote
 
 from openjarvis.connectors._stubs import BaseConnector, Document, SyncStatus
@@ -84,6 +85,60 @@ def _parse_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
             metadata[key] = raw_value.strip("'\"")
 
     return metadata, body
+
+
+# ---------------------------------------------------------------------------
+# Filename / path helpers for write-back tools
+# ---------------------------------------------------------------------------
+
+
+#: Characters that are problematic on Windows, macOS, or Linux filesystems,
+#: plus whitespace — all collapsed to ``-`` during title sanitization.
+_UNSAFE_TITLE_CHARS = re.compile(r'[\\/<>:"|?*\s]+')
+
+
+def _sanitize_title(title: str) -> str:
+    """Turn an arbitrary title into a safe ``.md`` filename stem.
+
+    Rules:
+    - Strip surrounding whitespace.
+    - Replace ``/\\<>:"|?*`` and any whitespace with ``-``.
+    - Collapse runs of ``-`` into a single dash.
+    - Strip leading / trailing dashes and dots.
+    - Reject the special names ``""`` and ``".."`` (raises ``ValueError``).
+    """
+    if not isinstance(title, str):
+        raise ValueError("title must be a string")
+    cleaned = _UNSAFE_TITLE_CHARS.sub("-", title.strip()).lower()
+    cleaned = re.sub(r"-+", "-", cleaned).strip("-.")
+    if not cleaned or cleaned == "..":
+        raise ValueError("title is empty or invalid after sanitization")
+    return cleaned
+
+
+def _resolve_inside_vault(vault: Path, relative: str) -> Path:
+    """Resolve *relative* against *vault* and verify it stays inside.
+
+    Raises :class:`ValueError` if the resolved path escapes the vault.
+    """
+    vault_resolved = vault.resolve()
+    candidate = (vault_resolved / relative).resolve()
+    try:
+        candidate.relative_to(vault_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"path '{relative}' escapes vault root {vault_resolved}"
+        ) from exc
+    return candidate
+
+
+def _format_frontmatter(tags: Iterable[str]) -> str:
+    """Render a YAML frontmatter block with the given tags list."""
+    tag_list = [str(t).strip() for t in tags if str(t).strip()]
+    if not tag_list:
+        return ""
+    rendered = ", ".join(tag_list)
+    return f"---\ntags: [{rendered}]\n---\n"
 
 
 # ---------------------------------------------------------------------------
@@ -203,11 +258,123 @@ class ObsidianConnector(BaseConnector):
         )
 
     # ------------------------------------------------------------------
+    # Write-back operations
+    # ------------------------------------------------------------------
+
+    def obsidian_create_note(
+        self,
+        title: str,
+        content: str,
+        folder: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        """Create a new ``.md`` note inside the vault.
+
+        Parameters
+        ----------
+        title:
+            Human-readable title; sanitized to form the filename stem.
+        content:
+            Markdown body for the note (frontmatter is added separately).
+        folder:
+            Optional subfolder (relative to vault root).  Created if it
+            doesn't exist.  Must not escape the vault.
+        tags:
+            Optional list of tags to render as YAML frontmatter.
+
+        Returns
+        -------
+        dict
+            ``{"path": <absolute path>, "url": <obsidian:// deep link>}``.
+
+        Raises
+        ------
+        ValueError
+            For invalid titles, folders escaping the vault, or when the
+            connector is not configured.
+        """
+        if not self.is_connected():
+            raise ValueError("Obsidian connector is not connected")
+
+        vault = Path(self._vault_path)
+        stem = _sanitize_title(title)
+
+        # Resolve the target directory (vault root or a subfolder).
+        if folder:
+            target_dir = _resolve_inside_vault(vault, folder)
+        else:
+            target_dir = vault.resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-suffix on collision: foo.md, foo-1.md, foo-2.md, ...
+        candidate = target_dir / f"{stem}.md"
+        suffix_n = 1
+        while candidate.exists():
+            candidate = target_dir / f"{stem}-{suffix_n}.md"
+            suffix_n += 1
+
+        # Re-check that the final path is inside the vault (defence in depth
+        # against a folder argument that somehow widened the resolve set).
+        _resolve_inside_vault(vault, str(candidate.relative_to(vault.resolve())))
+
+        body_parts: List[str] = []
+        if tags:
+            fm = _format_frontmatter(tags)
+            if fm:
+                body_parts.append(fm)
+        body_parts.append(content)
+        candidate.write_text("".join(body_parts), encoding="utf-8")
+
+        rel_path = candidate.relative_to(vault.resolve())
+        url = f"obsidian://open?vault={quote(vault.name)}&file={quote(str(rel_path))}"
+        return {"path": str(candidate), "url": url}
+
+    def obsidian_append_to_note(
+        self, relative_path: str, content: str
+    ) -> Dict[str, str]:
+        """Append *content* to an existing note inside the vault.
+
+        Parameters
+        ----------
+        relative_path:
+            Path of the target note relative to the vault root.  Must stay
+            inside the vault.
+        content:
+            Text to append.  Two newlines are inserted before it for
+            visual separation from the existing body.
+
+        Returns
+        -------
+        dict
+            ``{"path": <absolute path>, "url": <obsidian:// deep link>}``.
+
+        Raises
+        ------
+        ValueError
+            If the connector is not connected, the path escapes the
+            vault, or the file does not exist.
+        """
+        if not self.is_connected():
+            raise ValueError("Obsidian connector is not connected")
+
+        vault = Path(self._vault_path)
+        target = _resolve_inside_vault(vault, relative_path)
+        if not target.is_file():
+            raise ValueError(f"note not found: {relative_path}")
+
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n\n{content}")
+
+        rel_path = target.relative_to(vault.resolve())
+        url = f"obsidian://open?vault={quote(vault.name)}&file={quote(str(rel_path))}"
+        return {"path": str(target), "url": url}
+
+    # ------------------------------------------------------------------
     # MCP tools
     # ------------------------------------------------------------------
 
     def mcp_tools(self) -> List[ToolSpec]:
-        """Expose a single ``obsidian_search_notes`` tool for agent queries."""
+        """Expose search + write-back tools for agent use."""
         return [
             ToolSpec(
                 name="obsidian_search_notes",
@@ -231,5 +398,70 @@ class ObsidianConnector(BaseConnector):
                     "required": ["query"],
                 },
                 category="knowledge",
-            )
+            ),
+            ToolSpec(
+                name="obsidian_create_note",
+                description=(
+                    "Create a new Markdown note in the Obsidian vault. "
+                    "The title becomes the filename (sanitized). Returns "
+                    "the absolute path and an obsidian:// deep link."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Human-readable note title.",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Markdown body of the note.",
+                        },
+                        "folder": {
+                            "type": "string",
+                            "description": (
+                                "Optional subfolder inside the vault. "
+                                "Created if missing."
+                            ),
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional list of tags to write as YAML frontmatter."
+                            ),
+                        },
+                    },
+                    "required": ["title", "content"],
+                },
+                category="knowledge",
+                requires_confirmation=False,
+            ),
+            ToolSpec(
+                name="obsidian_append_to_note",
+                description=(
+                    "Append text to an existing note in the Obsidian "
+                    "vault. The relative_path must stay inside the vault."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "relative_path": {
+                            "type": "string",
+                            "description": (
+                                "Path of the target note relative to "
+                                "the vault root (e.g. "
+                                "'Projects/Inbox.md')."
+                            ),
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Text to append.",
+                        },
+                    },
+                    "required": ["relative_path", "content"],
+                },
+                category="knowledge",
+                requires_confirmation=False,
+            ),
         ]
